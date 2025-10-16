@@ -11,7 +11,7 @@ cachetools
 ccxt>=4.0.0
 
 # Web scraping and automation
-playwright>=1.40.0
+playwright==1.52.0
 beautifulsoup4>=4.12.0
 
 # Cryptography and security
