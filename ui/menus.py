@@ -1660,12 +1660,8 @@ class MenuSystem:
 
             print(f"{SUBTLE}{'─' * 50}{RESET}")
 
-            # Performance feedback
-            if elapsed_time < 5:
-                print(f"{SUCCESS}⚡ Excellent performance!{RESET}")
-            elif elapsed_time < 10:
-                print(f"{PRIMARY}✨ Good performance!{RESET}")
-            else:
+            # Performance feedback (only warn when noticeably slow)
+            if elapsed_time >= 10:
                 print(f"{WARNING}⏳ Price fetching took longer than expected{RESET}")
                 print(f"{SUBTLE}💡 This may be due to API rate limits or network delays{RESET}")
 

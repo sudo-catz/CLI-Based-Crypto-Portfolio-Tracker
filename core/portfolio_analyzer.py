@@ -687,8 +687,6 @@ class PortfolioAnalyzer:
                 print_warning(
                     "⚠️  Analysis took longer than expected - this may indicate API rate limits"
                 )
-            elif total_time < 20:
-                print_success("⚡ Excellent performance!")
 
             return fetched_data
 

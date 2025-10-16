@@ -9,10 +9,9 @@ using multiple sources: CoinGecko API, Exchange APIs, and fallback methods.
 import asyncio
 import time
 import requests
-import ccxt
-from typing import Dict, List, Optional, Union
-from threading import Lock
+from typing import Dict, List, Optional, Union, Tuple
 
+from config.constants import HYPERLIQUID_API_URL
 from utils.helpers import print_info, print_warning, print_error
 from utils.rate_limiter import binance_retry, okx_retry, bybit_retry
 from utils.price_service import ExchangePriceService
@@ -30,6 +29,13 @@ class EnhancedPriceService(ExchangePriceService):
         self._last_coingecko_request = 0
         # Reduced from 60/50=1.2s to 60/60=1.0s for faster testing while staying within limits
         self._coingecko_min_interval = 1.0
+
+        # Hyperliquid price cache to avoid repeated meta calls
+        self._hyperliquid_price_cache: Dict[str, Union[float, int, Dict[str, float]]] = {
+            "timestamp": 0,
+            "prices": {},
+        }
+        self._hyperliquid_cache_ttl = 5.0
 
         # Extended CoinGecko ID mappings for popular altcoins
         self._coingecko_mappings = {
@@ -140,7 +146,6 @@ class EnhancedPriceService(ExchangePriceService):
                 gecko_id = self._coingecko_mappings.get(symbol.upper())
 
             if not gecko_id:
-                print_warning(f"⚠️ No CoinGecko mapping for {symbol}")
                 return None
 
             # Respect rate limits
@@ -171,6 +176,129 @@ class EnhancedPriceService(ExchangePriceService):
         except Exception as e:
             print_error(f"❌ Unexpected CoinGecko error for {symbol}: {e}")
             return None
+
+    def get_hyperliquid_price(self, symbol: str) -> Optional[float]:
+        """
+        Fetch mark price for a perp listed on Hyperliquid.
+
+        Hyperliquid exposes a lightweight `metaAndAssetCtxs` endpoint that returns the entire
+        universe along with mark prices. We cache the parsed payload briefly to keep follow-up
+        lookups instantaneous while avoiding repeated network hits.
+        """
+        symbol_upper = symbol.upper()
+        now = time.time()
+        cache_timestamp = self._hyperliquid_price_cache.get("timestamp", 0)
+        cached_prices = self._hyperliquid_price_cache.get("prices", {})
+
+        if isinstance(cache_timestamp, (int, float)) and now - cache_timestamp < self._hyperliquid_cache_ttl:
+            if isinstance(cached_prices, dict):
+                return cached_prices.get(symbol_upper)
+            return None
+
+        try:
+            response = requests.post(
+                HYPERLIQUID_API_URL, json={"type": "metaAndAssetCtxs"}, timeout=10
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+            if not isinstance(payload, list) or len(payload) < 2:
+                print_warning("⚠️ Unexpected Hyperliquid response structure.")
+                return None
+
+            universe_block = payload[0]
+            ctxs_block = payload[1]
+
+            if not isinstance(universe_block, dict) or "universe" not in universe_block:
+                print_warning("⚠️ Hyperliquid meta block missing universe data.")
+                return None
+
+            universe = universe_block.get("universe", [])
+            asset_ctxs = ctxs_block if isinstance(ctxs_block, list) else []
+
+            if not isinstance(universe, list) or not asset_ctxs:
+                print_warning("⚠️ Hyperliquid meta response missing asset contexts.")
+                return None
+
+            price_map: Dict[str, float] = {}
+            for meta, ctx in zip(universe, asset_ctxs):
+                if not isinstance(meta, dict) or not isinstance(ctx, dict):
+                    continue
+                name = meta.get("name")
+                mark_px = ctx.get("markPx") or ctx.get("midPx") or ctx.get("oraclePx")
+                if name and mark_px is not None:
+                    try:
+                        price_map[str(name).upper()] = float(mark_px)
+                    except (TypeError, ValueError):
+                        continue
+
+            # Update cache
+            self._hyperliquid_price_cache = {
+                "timestamp": now,
+                "prices": price_map,
+            }
+
+            return price_map.get(symbol_upper)
+
+        except requests.exceptions.RequestException as e:
+            print_warning(f"⚠️ Hyperliquid request error for {symbol_upper}: {e}")
+            return None
+        except (ValueError, TypeError) as e:
+            print_warning(f"⚠️ Hyperliquid data parsing error for {symbol_upper}: {e}")
+            return None
+        except Exception as e:
+            print_error(f"❌ Unexpected Hyperliquid error for {symbol_upper}: {e}")
+            return None
+
+    def _get_supported_market_price(self, symbol: str) -> Optional[float]:
+        """Helper that defers to the base exchange logic for supported markets."""
+        try:
+            return super().get_price(symbol)
+        except Exception as e:
+            print_warning(f"⚠️ Base exchange price fetch failed for {symbol.upper()}: {e}")
+            return None
+
+    def get_price(self, symbol: str) -> Optional[float]:
+        """
+        Enhanced price lookup that prioritizes lightweight sources for custom coins
+        while retaining exchange-first behaviour for supported majors.
+        """
+        symbol_upper = symbol.upper()
+
+        if symbol_upper in self._stablecoins:
+            return 1.0
+
+        if symbol_upper in self._supported_pairs:
+            base_price = self._get_supported_market_price(symbol)
+            if base_price and base_price > 0:
+                return base_price
+
+        price = self.get_coingecko_price(symbol)
+        if price and price > 0:
+            return price
+
+        price = self.get_hyperliquid_price(symbol)
+        if price and price > 0:
+            return price
+
+        if symbol_upper in self._supported_pairs:
+            fallback_price = self._get_supported_market_price(symbol)
+            if fallback_price and fallback_price > 0:
+                return fallback_price
+
+        return 0.0
+
+    async def get_prices_async(self, symbols: List[str]) -> Dict[str, Optional[float]]:
+        """Async wrapper that leverages the enhanced synchronous get_price method."""
+        loop = asyncio.get_event_loop()
+
+        async def fetch(symbol: str) -> Tuple[str, Optional[float]]:
+            price = await loop.run_in_executor(None, self.get_price, symbol)
+            return symbol, price
+
+        tasks = [fetch(symbol) for symbol in symbols]
+        results = await asyncio.gather(*tasks)
+        return {symbol: price for symbol, price in results}
 
     def get_exchange_price_for_custom_pair(
         self, symbol: str, trading_pairs: List[str]
@@ -275,28 +403,20 @@ class EnhancedPriceService(ExchangePriceService):
         if symbol.upper() in ["USDT", "USDC", "DAI", "BUSD", "FDUSD", "TUSD"]:
             return 1.0
 
-        # Method 1: Try existing exchange method first (for major coins)
-        if symbol.upper() in self._supported_pairs:
-            price = self.get_price(symbol)
+        if coingecko_id:
+            price = self.get_coingecko_price(symbol, coingecko_id)
             if price and price > 0:
                 return price
 
-        # Method 2: Try CoinGecko API
-        price = self.get_coingecko_price(symbol, coingecko_id)
+        # High-level helper delegates to the enhanced get_price flow.
+        price = self.get_price(symbol)
         if price and price > 0:
             return price
 
-        # Method 3: Try exchange pairs if provided
         if exchange_pairs:
-            price = self.get_exchange_price_for_custom_pair(symbol, exchange_pairs)
-            if price and price > 0:
-                return price
-
-        # Method 4: Try auto-generated common pairs
-        auto_pairs = [f"{symbol.upper()}/USDT", f"{symbol.upper()}/USDC", f"{symbol.upper()}/USD"]
-        price = self.get_exchange_price_for_custom_pair(symbol, auto_pairs)
-        if price and price > 0:
-            return price
+            manual_price = self.get_exchange_price_for_custom_pair(symbol, exchange_pairs)
+            if manual_price and manual_price > 0:
+                return manual_price
 
         print_warning(f"⚠️ Could not fetch price for {symbol} from any source")
         return None

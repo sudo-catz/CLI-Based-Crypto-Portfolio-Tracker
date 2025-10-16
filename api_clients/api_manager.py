@@ -120,6 +120,9 @@ class APIKeyManager:
         print_header("API Key Management Authentication")
         print_info("Enter your master password to access encrypted API keys")
 
+        if not os.path.exists(self.config_file):
+            return self._handle_first_time_setup()
+
         max_attempts = 3
         for attempt in range(max_attempts):
             password = getpass.getpass(f"{Fore.CYAN}Master password: {Style.RESET_ALL}")
@@ -144,10 +147,6 @@ class APIKeyManager:
 
     def _verify_password(self, password: str) -> bool:
         """Verify the master password"""
-        if not os.path.exists(self.config_file):
-            # First time setup
-            return self._setup_master_password(password)
-
         try:
             salt = self._get_or_create_salt()
             key = self._derive_key(password, salt)
@@ -162,26 +161,52 @@ class APIKeyManager:
         except Exception:
             return False
 
-    def _setup_master_password(self, password: str) -> bool:
-        """Setup master password for first time"""
-        from config.constants import DEBUG_MODE
+    def _handle_first_time_setup(self) -> bool:
+        """Interactive flow for creating the initial master password."""
+        from config.constants import DEBUG_MODE, DEBUG_MASTER_PASSWORD
 
         if DEBUG_MODE:
-            print_info("Debug mode: Setting up default master password")
-        else:
-            print_info("Setting up master password for first time")
+            password = DEBUG_MASTER_PASSWORD
+            if not self._store_master_password(password):
+                print_error("Debug mode: Failed to initialize master password storage.")
+                return False
+            self._initialize_encryption(password)
+            print_success("Debug mode: Master password set successfully")
+            print_success("Authentication successful")
+            self._auth_locked = False
+            return True
+
+        print_info("No existing API vault found. Let's set up a master password (min 8 characters).")
+
+        while True:
+            password = getpass.getpass(
+                f"{Fore.CYAN}Create master password (min 8 chars): {Style.RESET_ALL}"
+            )
+            if len(password) < 8:
+                print_error("Password must be at least 8 characters long")
+                continue
+
             confirm_password = getpass.getpass(
                 f"{Fore.CYAN}Confirm master password: {Style.RESET_ALL}"
             )
-
             if password != confirm_password:
                 print_error("Passwords don't match")
-                return False
+                continue
 
-            if len(password) < 8:
-                print_error("Password must be at least 8 characters long")
-                return False
+            if not self._store_master_password(password):
+                print_error("Failed to initialize encrypted store. Please try again.")
+                continue
 
+            self._initialize_encryption(password)
+            print_success("Master password set successfully")
+            print_success("Authentication successful")
+            self._auth_locked = False
+            return True
+
+    def _store_master_password(self, password: str) -> bool:
+        """Persist an empty encrypted config using the provided master password."""
+        if len(password) < 8:
+            return False
         # Create empty encrypted config
         salt = self._get_or_create_salt()
         key = self._derive_key(password, salt)
@@ -197,10 +222,6 @@ class APIKeyManager:
         if os.name != "nt":
             os.chmod(self.config_file, 0o600)
 
-        if DEBUG_MODE:
-            print_success("Debug mode: Master password set successfully")
-        else:
-            print_success("Master password set successfully")
         return True
 
     def store_credentials(self, exchange: str, credentials: APICredentials):

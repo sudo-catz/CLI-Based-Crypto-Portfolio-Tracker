@@ -23,6 +23,8 @@ import ccxt
 from typing import Dict, List, Optional, Any, Tuple, Callable
 from threading import Lock
 from functools import lru_cache, partial
+from collections import defaultdict
+from inspect import signature
 from cachetools import TTLCache
 import aiohttp  # For CoinGecko API calls
 
@@ -80,6 +82,8 @@ class ExchangePriceService:
 
         # CoinMarketCap specific cache & client
         self._cmc_client = None
+        self._exchange_known_pairs = defaultdict(set)
+        self._exchange_supports_partial_markets: Dict[str, bool] = {}
         if (
             CoinMarketCapAPI
             and COINMARKETCAP_API_KEY
@@ -117,7 +121,7 @@ class ExchangePriceService:
                         "sandbox": False,
                         "rateLimit": 1200,
                         "enableRateLimit": True,
-                        "timeout": 10000,
+                        "timeout": 5000,
                     }
                 )
             except Exception as e:
@@ -130,7 +134,7 @@ class ExchangePriceService:
                         "sandbox": False,
                         "rateLimit": 2000,
                         "enableRateLimit": True,
-                        "timeout": 10000,
+                        "timeout": 5000,
                     }
                 )
             except Exception as e:
@@ -143,7 +147,7 @@ class ExchangePriceService:
                         "sandbox": False,
                         "rateLimit": 1000,
                         "enableRateLimit": True,
-                        "timeout": 10000,
+                        "timeout": 5000,
                     }
                 )
             except Exception as e:
@@ -269,9 +273,52 @@ class ExchangePriceService:
         if not exchange_instance:
             return None
 
+        exchange_key = exchange_name.lower()
         pairs = self._supported_pairs.get(symbol.upper(), [])
         if not pairs:
             pairs = [f"{symbol.upper()}/USDT", f"{symbol.upper()}/USDC", f"{symbol.upper()}/BTC"]
+
+        # Load only the trading pairs we care about to avoid pulling full market catalogs.
+        known_pairs = self._exchange_known_pairs[exchange_key]
+        markets = getattr(exchange_instance, "markets", {}) or {}
+        missing_pairs = [
+            pair
+            for pair in pairs
+            if pair not in known_pairs and pair not in markets
+        ]
+
+        if missing_pairs:
+            supports_partial = self._exchange_supports_partial_markets.get(exchange_key)
+            if supports_partial is None:
+                try:
+                    sig = signature(exchange_instance.load_markets)
+                    supports_partial = "symbols" in sig.parameters
+                except (TypeError, ValueError):
+                    supports_partial = False
+                self._exchange_supports_partial_markets[exchange_key] = bool(supports_partial)
+
+            if supports_partial:
+                try:
+                    exchange_instance.load_markets(symbols=missing_pairs, reload=False)
+                    known_pairs.update(missing_pairs)
+                    print_info(
+                        f"⚡ Quick warm-up for {exchange_name}: {', '.join(missing_pairs)}"
+                    )
+                except ccxt.NotSupported:
+                    # Some exchanges ignore partial market loading; fall back to lazy loading.
+                    known_pairs.update(missing_pairs)
+                    self._exchange_supports_partial_markets[exchange_key] = False
+                except TypeError:
+                    # Signalled at runtime that partial symbols are unsupported.
+                    self._exchange_supports_partial_markets[exchange_key] = False
+                    known_pairs.update(missing_pairs)
+                except Exception as e:
+                    print_warning(
+                        f"⚠️ {exchange_name} quick warm-up for {', '.join(missing_pairs)} failed: {e}"
+                    )
+            else:
+                # No partial support; rely on lazy loading via fetch_ticker to avoid heavy init.
+                known_pairs.update(missing_pairs)
 
         for pair in pairs:
             try:
@@ -435,8 +482,8 @@ class ExchangePriceService:
             try:
                 # Using aiohttp.ClientTimeout for request timeout
                 timeout_settings = aiohttp.ClientTimeout(
-                    total=20
-                )  # 20 seconds total timeout for the request
+                    total=10
+                )  # 10 seconds total timeout for the request
                 async with aiohttp.ClientSession(timeout=timeout_settings) as session:
                     async with session.get(COINGECKO_COIN_LIST_URL) as response:
                         response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
