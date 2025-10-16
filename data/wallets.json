@@ -1,0 +1,10 @@
+{
+  "wallets": {
+    "ethereum": [],
+    "bitcoin": [],
+    "solana": []
+  },
+  "hyperliquid_enabled": [],
+  "lighter_enabled": [],
+  "balance_offset": 0.0
+}
