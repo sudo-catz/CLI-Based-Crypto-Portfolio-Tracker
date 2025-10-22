@@ -16,11 +16,13 @@ import asyncio
 import argparse
 import json
 import re
+import random
 from datetime import datetime
 from pathlib import Path
-from playwright.async_api import async_playwright
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
+
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 try:
     from bs4 import BeautifulSoup
@@ -29,6 +31,17 @@ try:
 except ImportError:
     BS4_AVAILABLE = False
     print("⚠️ BeautifulSoup4 not available. Install with: pip install beautifulsoup4")
+
+# Ensure repository root is on sys.path when executed directly
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from config.constants import (
+    DEBANK_URL_TEMPLATE,
+    DEBANK_SCREENSHOT_ON_ERROR,
+    SCREENSHOTS_DIR,
+)
 
 
 @dataclass
@@ -171,93 +184,233 @@ class EnhancedDeBankScraper:
         """Scrape wallet with enhanced token breakdown."""
         print(f"🔍 Enhanced scraping for {address[:8]}...")
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+        user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        ]
 
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1920, "height": 1080},
-                extra_http_headers={
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Accept-Encoding": "gzip, deflate, br",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                },
-            )
+        max_retries = 3
+        balance_selectors = self.selectors.get("portfolio_balance", [])
+        screenshot_dir = Path(SCREENSHOTS_DIR or "data/screenshots")
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
 
-            page = await context.new_page()
+        for attempt in range(max_retries):
+            if attempt > 0:
+                print(f"  🔁 Retry attempt {attempt + 1}/{max_retries} for {address[:8]}...")
+                await asyncio.sleep(5)
 
-            try:
-                url = f"https://debank.com/profile/{address}"
-
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                await page.wait_for_selector("body", timeout=30000)
-
-                # Wait for dynamic content to load
-                await asyncio.sleep(10)
-
-                # Click show all buttons to reveal hidden tokens and protocols
-                await self._click_show_all_buttons(page)
-
-                # Extract total portfolio value
-                total_value = await self._extract_total_value(page)
-                print(f"💰 Portfolio value: ${total_value:,.2f}")
-
-                # Extract individual token balances
-                tokens = await self._extract_token_balances(page)
-                print(f"🪙 Found {len(tokens)} tokens")
-
-                # Extract protocol positions
-                protocols = await self._extract_protocol_positions(page)
-                print(f"🏛️ Found {len(protocols)} protocols")
-
-                # Create enhanced wallet data
-                wallet_data = EnhancedWalletData(
-                    address=address,
-                    total_usd_value=total_value,
-                    tokens=tokens,
-                    protocols=protocols,
-                    timestamp=datetime.now().isoformat(),
+            async with async_playwright() as p:
+                browser = None
+                context = None
+                page = None
+                screenshot_path = screenshot_dir / (
+                    f"debank_error_{address}_{datetime.now().strftime('%Y%m%d%H%M%S')}_attempt{attempt+1}.png"
                 )
 
-                # VALIDATION: Check if extracted values match total portfolio
-                await self._validate_extraction(wallet_data, total_value)
-
-                # 4. Supplementary extraction from Panel_container elements (may include additional protocols)
                 try:
-                    panel_selector = self.selectors.get(
-                        "panel_container", '[class*="Panel_container"]'
+                    user_agent = random.choice(user_agents)
+
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--no-sandbox",
+                            "--disable-blink-features=AutomationControlled",
+                            "--disable-web-security",
+                            "--disable-features=VizDisplayCompositor",
+                            "--disable-dev-shm-usage",
+                            "--disable-gpu",
+                        ],
                     )
-                    panel_elements = await page.query_selector_all(panel_selector)
-                    if panel_elements:
+
+                    context = await browser.new_context(
+                        user_agent=user_agent,
+                        viewport={"width": 1920, "height": 1080},
+                        extra_http_headers={
+                            "Accept-Language": "en-US,en;q=0.9",
+                            "Accept-Encoding": "gzip, deflate, br",
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                            "Connection": "keep-alive",
+                            "Upgrade-Insecure-Requests": "1",
+                            "Cache-Control": "no-cache",
+                            "Pragma": "no-cache",
+                        },
+                    )
+
+                    page = await context.new_page()
+                    url = DEBANK_URL_TEMPLATE.format(address)
+                    if attempt == 0:
+                        print(f"  🌐 Fetching DeBank profile: {url}")
+
+                    await page.goto(url, wait_until="domcontentloaded", timeout=120000)
+
+                    current_url = page.url
+                    if "login" in current_url or "auth" in current_url:
                         print(
-                            f"  🔍 Found {len(panel_elements)} panel container elements (additional protocols). Parsing..."
+                            f"  ⚠️ Redirected to login/auth page for {address[:8]}. Possible bot detection."
                         )
-                        for j, panel_el in enumerate(panel_elements):
-                            try:
-                                protocol_data = await self._parse_protocol_element(
-                                    panel_el, j + len(protocols)
-                                )
-                                if protocol_data and not any(
-                                    p["name"] == protocol_data["name"]
-                                    and abs(p["total_value"] - protocol_data["total_value"]) < 0.01
-                                    for p in protocols
-                                ):
-                                    protocols.append(protocol_data)
-                            except Exception:
-                                continue
+                        if DEBANK_SCREENSHOT_ON_ERROR:
+                            await page.screenshot(path=str(screenshot_path))
+                        continue
+
+                    await page.wait_for_selector("body", timeout=60000)
+
+                    content_loaded = False
+                    for selector in balance_selectors[:5]:
+                        try:
+                            await page.wait_for_selector(selector, timeout=15000)
+                            content_loaded = True
+                            break
+                        except Exception:
+                            continue
+
+                    if not content_loaded:
+                        try:
+                            await page.wait_for_function(
+                                """() => {
+                                    const text = document.body.innerText;
+                                    return text.includes('$') && /\\$[\\d,]+/.test(text);
+                                }""",
+                                timeout=20000,
+                            )
+                            content_loaded = True
+                        except Exception:
+                            pass
+
+                    if not content_loaded:
+                        try:
+                            await page.wait_for_load_state("networkidle", timeout=15000)
+                            content_loaded = True
+                        except Exception:
+                            pass
+
+                    await asyncio.sleep(8)
+
+                    try:
+                        await page.wait_for_function(
+                            """() => {
+                                const elements = document.querySelectorAll('*');
+                                for (let el of elements) {
+                                    const text = el.textContent || '';
+                                    if (text.match(/\\$[\\d,]+\\.?[\\d]*/)) {
+                                        const amount = parseFloat(text.replace(/[^\\d.]/g, ''));
+                                        if (!Number.isNaN(amount) && amount > 0.01) {
+                                            return true;
+                                        }
+                                    }
+                                }
+                                return false;
+                            }""",
+                            timeout=10000,
+                        )
+                    except Exception:
+                        pass
+
+                    await self._click_show_all_buttons(page)
+
+                    total_value = await self._extract_total_value(page)
+                    if total_value <= 0:
+                        print(
+                            f"  ⚠️ Got non-positive total value (${total_value:,.2f}) for {address[:8]} on attempt {attempt + 1}"
+                        )
+                        if DEBANK_SCREENSHOT_ON_ERROR and page:
+                            await page.screenshot(path=str(screenshot_path))
+                        if attempt < max_retries - 1:
+                            print("  🔁 Will retry enhanced scrape after short delay.")
+                            continue
+                        print(
+                            f"  ❌ Giving up on enhanced scrape for {address[:8]} after {max_retries} attempts."
+                        )
+                        return None
+
+                    print(f"💰 Portfolio value: ${total_value:,.2f}")
+
+                    tokens = await self._extract_token_balances(page)
+                    print(f"🪙 Found {len(tokens)} tokens")
+
+                    protocols = await self._extract_protocol_positions(page)
+                    print(f"🏛️ Found {len(protocols)} protocols")
+
+                    wallet_data = EnhancedWalletData(
+                        address=address,
+                        total_usd_value=total_value,
+                        tokens=tokens,
+                        protocols=protocols,
+                        timestamp=datetime.now().isoformat(),
+                    )
+
+                    await self._validate_extraction(wallet_data, total_value)
+
+                    try:
+                        if len(tokens) == 0 and attempt < max_retries - 1:
+                            print(
+                                f"  ⚠️ No tokens detected for {address[:8]} (attempt {attempt + 1}). Retrying..."
+                            )
+                            if DEBANK_SCREENSHOT_ON_ERROR and page:
+                                await page.screenshot(path=str(screenshot_path))
+                            continue
+
+                        panel_selector = self.selectors.get(
+                            "panel_container", '[class*="Panel_container"]'
+                        )
+                        panel_elements = await page.query_selector_all(panel_selector)
+                        if panel_elements:
+                            print(
+                                f"  🔍 Found {len(panel_elements)} panel container elements (additional protocols). Parsing..."
+                            )
+                            for j, panel_el in enumerate(panel_elements):
+                                try:
+                                    protocol_data = await self._parse_protocol_element(
+                                        panel_el, j + len(protocols)
+                                    )
+                                    if protocol_data and not any(
+                                        p["name"] == protocol_data["name"]
+                                        and abs(p["total_value"] - protocol_data["total_value"]) < 0.01
+                                        for p in protocols
+                                    ):
+                                        protocols.append(protocol_data)
+                                except Exception:
+                                    continue
+                    except Exception as e:
+                        print(f"  ⚠️ Error while parsing panel containers: {e}")
+
+                    if debug_rows:
+                        await self._dump_first_rows(page)
+
+                    print(
+                        f"✅ Enhanced DeBank scrape succeeded for {address[:8]} on attempt {attempt + 1}"
+                    )
+                    return wallet_data
+
+                except PlaywrightTimeoutError:
+                    print(
+                        f"  ⏱️ Timeout while scraping {address[:8]} on attempt {attempt + 1}"
+                    )
+                    if DEBANK_SCREENSHOT_ON_ERROR and page:
+                        await page.screenshot(path=str(screenshot_path))
                 except Exception as e:
-                    print(f"  ⚠️ Error while parsing panel containers: {e}")
+                    print(f"❌ Error scraping {address[:8]} on attempt {attempt + 1}: {e}")
+                    if DEBANK_SCREENSHOT_ON_ERROR and page:
+                        await page.screenshot(path=str(screenshot_path))
+                finally:
+                    try:
+                        if page:
+                            await page.close()
+                        if context:
+                            await context.close()
+                        if browser:
+                            await browser.close()
+                    except Exception:
+                        pass
 
-                if debug_rows:
-                    await self._dump_first_rows(page)
-
-                return wallet_data
-
-            except Exception as e:
-                print(f"❌ Error scraping {address[:8]}: {e}")
-                return None
-            finally:
-                await browser.close()
+        print(
+            f"⚠️ Enhanced DeBank scraping failed for {address[:8]} after {max_retries} attempts."
+        )
+        if DEBANK_SCREENSHOT_ON_ERROR:
+            print(
+                f"  ℹ️ Screenshots (if any) saved to: {screenshot_dir.resolve()}"
+            )
+        return None
 
     async def _click_show_all_buttons(self, page):
         """Click 'Show all' buttons to reveal tokens with small balances."""
