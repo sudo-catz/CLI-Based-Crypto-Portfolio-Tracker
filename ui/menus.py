@@ -40,6 +40,7 @@ from utils.display_theme import theme
 from ui.display_functions import (
     display_comprehensive_overview,
     display_wallet_balances,
+    display_polymarket_positions,
     display_perp_dex_positions,
     display_cex_breakdown,
     display_asset_distribution,
@@ -86,18 +87,45 @@ class MenuSystem:
 
             print(f"\n{PRIMARY}ANALYSIS OPTIONS{RESET}")
             print(f"{SUBTLE}{'─' * 18}{RESET}")
-            print(f"{ACCENT}1.{RESET} {PRIMARY}Wallet Balances{RESET}")
-            print(f"{ACCENT}2.{RESET} {PRIMARY}Perp DEX Positions{RESET}")
-            print(f"{ACCENT}3.{RESET} {PRIMARY}CEX Account Breakdown{RESET}")
-            print(f"{ACCENT}4.{RESET} {PRIMARY}Asset Distribution Chart{RESET}")
+            wallet_platform_data = portfolio_metrics.get("wallet_platform_data_raw", []) or []
+            polymarket_available = any(
+                info.get("platform") == "polymarket" for info in wallet_platform_data
+            )
+
+            option_map: Dict[str, str] = {}
+            option_idx = 1
+
+            option_map[str(option_idx)] = "wallet"
+            print(f"{ACCENT}{option_idx}.{RESET} {PRIMARY}Wallet Balances{RESET}")
+            option_idx += 1
+
+            option_map[str(option_idx)] = "perp"
+            print(f"{ACCENT}{option_idx}.{RESET} {PRIMARY}Perp DEX Positions{RESET}")
+            option_idx += 1
+
+            option_map[str(option_idx)] = "cex"
+            print(f"{ACCENT}{option_idx}.{RESET} {PRIMARY}CEX Account Breakdown{RESET}")
+            option_idx += 1
+
+            if polymarket_available:
+                option_map[str(option_idx)] = "polymarket"
+                print(f"{ACCENT}{option_idx}.{RESET} {PRIMARY}Polymarket Positions{RESET}")
+                option_idx += 1
+
+            option_map[str(option_idx)] = "asset"
+            print(f"{ACCENT}{option_idx}.{RESET} {PRIMARY}Asset Distribution Chart{RESET}")
+            option_idx += 1
+
             exposure_option = None
             if not portfolio_metrics.get("quick_mode", False):
-                exposure_option = "5"
+                exposure_option = str(option_idx)
                 print(
-                    f"{ACCENT}5.{RESET} {PRIMARY}🎯 Exposure Analysis{RESET} "
+                    f"{ACCENT}{exposure_option}.{RESET} {PRIMARY}🎯 Exposure Analysis{RESET} "
                     f"{SUBTLE}• Risk & concentration tracking{RESET}"
                 )
-            back_option = "6" if exposure_option else "5"
+                option_idx += 1
+
+            back_option = str(option_idx)
             print(f"{ACCENT}{back_option}.{RESET} {SUBTLE}Back to Previous Menu{RESET}")
             print(f"{SUBTLE}{'─' * 40}{RESET}")
             print(
@@ -107,7 +135,7 @@ class MenuSystem:
                 f"{SUBTLE}💡 Type 'combine' to generate combined portfolio analysis from all wallets{RESET}"
             )
 
-            menu_prompt = "1-6" if exposure_option else "1-5"
+            menu_prompt = f"1-{back_option}"
             choice = input(
                 f"{PRIMARY}Select option ({menu_prompt}, 'refresh', or 'combine'): {RESET}"
             )
@@ -150,19 +178,20 @@ class MenuSystem:
                 # Stay in overview menu
                 input(f"\n{SUBTLE}Press Enter to continue...{RESET}")
                 continue
-            elif choice == "1":
-                # Pass complete portfolio metrics instead of just raw wallet data
-                # This ensures enhanced wallet breakdown with submenu works in past analysis
-                # Add analysis folder context to portfolio metrics if available
-                if analysis_folder:
-                    portfolio_metrics["_analysis_folder"] = analysis_folder
-                display_wallet_balances(portfolio_metrics)
-            elif choice == "2":
-                display_perp_dex_positions(portfolio_metrics)
-            elif choice == "3":
-                display_cex_breakdown(portfolio_metrics)
-            elif choice == "4":
-                display_asset_distribution(portfolio_metrics)
+            elif choice in option_map:
+                action = option_map[choice]
+                if action == "wallet":
+                    if analysis_folder:
+                        portfolio_metrics["_analysis_folder"] = analysis_folder
+                    display_wallet_balances(portfolio_metrics)
+                elif action == "polymarket":
+                    display_polymarket_positions(portfolio_metrics)
+                elif action == "perp":
+                    display_perp_dex_positions(portfolio_metrics)
+                elif action == "cex":
+                    display_cex_breakdown(portfolio_metrics)
+                elif action == "asset":
+                    display_asset_distribution(portfolio_metrics)
             elif (
                 choice == exposure_option
                 and exposure_option is not None
@@ -388,13 +417,16 @@ class MenuSystem:
             print(
                 f"{theme.ACCENT}4.{theme.RESET} {theme.PRIMARY}🪙 Toggle Lighter{theme.RESET} {theme.SUBTLE}(Ethereum only){theme.RESET}"
             )
-            print(f"{theme.ACCENT}5.{theme.RESET} {theme.SUBTLE}⬅️ Back to Main Menu{theme.RESET}")
+            print(
+                f"{theme.ACCENT}5.{theme.RESET} {theme.PRIMARY}🎯 Configure Polymarket{theme.RESET} {theme.SUBTLE}(Ethereum only){theme.RESET}"
+            )
+            print(f"{theme.ACCENT}6.{theme.RESET} {theme.SUBTLE}⬅️ Back to Main Menu{theme.RESET}")
             print(f"{theme.SUBTLE}{'─' * 40}{theme.RESET}")
 
             # Simple clean input
-            choice = input(f"{theme.PRIMARY}Choose an option (1-5): {theme.RESET}").strip()
+            choice = input(f"{theme.PRIMARY}Choose an option (1-6): {theme.RESET}").strip()
 
-            if choice not in ["1", "2", "3", "4", "5"]:
+            if choice not in ["1", "2", "3", "4", "5", "6"]:
                 clear_screen()
                 print_header("Wallet Management")
                 wallet_tracker.list_wallets()
@@ -410,11 +442,14 @@ class MenuSystem:
                     f"{theme.ACCENT}4.{theme.RESET} {theme.PRIMARY}🪙 Toggle Lighter{theme.RESET} {theme.SUBTLE}(Ethereum only){theme.RESET}"
                 )
                 print(
-                    f"{theme.ACCENT}5.{theme.RESET} {theme.SUBTLE}⬅️ Back to Main Menu{theme.RESET}"
+                    f"{theme.ACCENT}5.{theme.RESET} {theme.PRIMARY}🎯 Configure Polymarket{theme.RESET} {theme.SUBTLE}(Ethereum only){theme.RESET}"
+                )
+                print(
+                    f"{theme.ACCENT}6.{theme.RESET} {theme.SUBTLE}⬅️ Back to Main Menu{theme.RESET}"
                 )
                 print(f"{theme.SUBTLE}{'─' * 40}{theme.RESET}")
 
-                print_error(f"❌ Invalid choice '{choice}'. Please select 1-5.")
+                print_error(f"❌ Invalid choice '{choice}'. Please select 1-6.")
                 input("\nPress Enter to continue...")
                 continue
 
@@ -429,6 +464,8 @@ class MenuSystem:
             elif choice == "4":
                 self._toggle_lighter_enhanced(wallet_tracker)
             elif choice == "5":
+                self._configure_polymarket_enhanced(wallet_tracker)
+            elif choice == "6":
                 break
 
             input(f"\n{theme.SUBTLE}Press Enter to continue...{theme.RESET}")
@@ -500,6 +537,33 @@ class MenuSystem:
                             print_success("✅ Lighter tracking enabled!")
                         else:
                             print_info("Lighter tracking already enabled for this address.")
+
+                    print(f"\n{theme.PRIMARY}🎯 POLYMARKET MARKETS{theme.RESET}")
+                    print(f"{theme.SUBTLE}{'─' * 22}{theme.RESET}")
+                    print(
+                        f"{theme.INFO}💡 Enable Polymarket proxy tracking for this wallet?{theme.RESET}"
+                    )
+                    if get_yes_no("Enable Polymarket tracking", default=False):
+                        if address not in wallet_tracker.polymarket_enabled:
+                            wallet_tracker.toggle_polymarket(address)
+                        else:
+                            print_info("Polymarket tracking already enabled for this address.")
+
+                        proxy_input = input(
+                            "Enter Polymarket proxy wallet (leave blank to set later): "
+                        ).strip()
+                        if proxy_input:
+                            try:
+                                proxy_address = Web3.to_checksum_address(proxy_input)
+                                wallet_tracker.set_polymarket_proxy(address, proxy_address)
+                            except ValueError:
+                                print_warning(
+                                    "Invalid proxy address. Configure it later from wallet management."
+                                )
+                        else:
+                            print_warning(
+                                "No proxy provided. Configure it later to fetch Polymarket data."
+                            )
 
         except ValueError as exc:
             print_error(
@@ -670,6 +734,148 @@ class MenuSystem:
             except ValueError:
                 print_error("Invalid input.")
 
+    def _configure_polymarket_enhanced(self, wallet_tracker):
+        """Interactive configuration for Polymarket proxy tracking."""
+        print_header("Configure Polymarket Tracking")
+
+        eth_wallets = wallet_tracker.wallets.get("ethereum", [])
+        if not eth_wallets:
+            print_info("No Ethereum wallets tracked.")
+            print(
+                f"{theme.SUBTLE}💡 Add an Ethereum wallet first to configure Polymarket tracking.{theme.RESET}"
+            )
+            return
+
+        try:
+            from utils.helpers import get_validated_choice, get_yes_no
+
+            while True:
+                print(f"{theme.PRIMARY}🎯 ETHEREUM WALLETS{theme.RESET}")
+                print(f"{theme.SUBTLE}{'─' * 22}{theme.RESET}")
+                for idx, addr in enumerate(eth_wallets, 1):
+                    short_addr = addr[:8] + "..." + addr[-6:] if len(addr) > 20 else addr
+                    enabled = addr in wallet_tracker.polymarket_enabled
+                    proxy = wallet_tracker.polymarket_proxies.get(addr)
+                    status = (
+                        f"{theme.SUCCESS}✅ Enabled{theme.RESET}"
+                        if enabled
+                        else f"{theme.ERROR}❌ Disabled{theme.RESET}"
+                    )
+                    proxy_display = (
+                        proxy[:8] + "..." + proxy[-6:]
+                        if proxy and len(proxy) > 20
+                        else (proxy or "None")
+                    )
+                    proxy_color = theme.ACCENT if proxy else theme.WARNING
+                    print(
+                        f"  {theme.ACCENT}{idx}.{theme.RESET} {short_addr} {status} "
+                        f"{theme.SUBTLE}| Proxy: {proxy_color}{proxy_display}{theme.RESET}"
+                    )
+
+                cancel_option = len(eth_wallets) + 1
+                print(
+                    f"  {theme.ACCENT}{cancel_option}.{theme.RESET} {theme.SUBTLE}Done{theme.RESET}"
+                )
+
+                choice = get_validated_choice(
+                    "Select wallet to manage Polymarket settings",
+                    [str(i) for i in range(1, cancel_option + 1)],
+                )
+
+                if choice == str(cancel_option):
+                    print_info("Polymarket configuration complete.")
+                    return
+
+                selected_idx = int(choice) - 1
+                selected_address = eth_wallets[selected_idx]
+                short_selected = (
+                    selected_address[:8] + "..." + selected_address[-6:]
+                    if len(selected_address) > 20
+                    else selected_address
+                )
+
+                while True:
+                    proxy_value = wallet_tracker.polymarket_proxies.get(selected_address)
+                    enabled = selected_address in wallet_tracker.polymarket_enabled
+                    status_str = "Enabled" if enabled else "Disabled"
+                    proxy_display = proxy_value or "None"
+
+                    print_header(f"Polymarket • {short_selected}")
+                    print(f"{theme.INFO}Current status: {status_str}{theme.RESET}")
+                    print(f"{theme.INFO}Proxy wallet: {proxy_display}{theme.RESET}")
+
+                    print(f"\n{theme.PRIMARY}OPTIONS{theme.RESET}")
+                    print(f"{theme.SUBTLE}{'─' * 8}{theme.RESET}")
+                    print(
+                        f"{theme.ACCENT}1.{theme.RESET} {theme.PRIMARY}Toggle Tracking{theme.RESET} "
+                        f"{theme.SUBTLE}(Enable/Disable){theme.RESET}"
+                    )
+                    print(
+                        f"{theme.ACCENT}2.{theme.RESET} {theme.PRIMARY}Set or Update Proxy{theme.RESET}"
+                    )
+                    print(f"{theme.ACCENT}3.{theme.RESET} {theme.WARNING}Clear Proxy{theme.RESET}")
+                    print(f"{theme.ACCENT}4.{theme.RESET} {theme.SUBTLE}Back{theme.RESET}")
+
+                    sub_choice = get_validated_choice(
+                        "Choose an option", ["1", "2", "3", "4"]
+                    )
+
+                    if sub_choice == "1":
+                        toggled_status = "disable" if enabled else "enable"
+                        if get_yes_no(
+                            f"{toggled_status.capitalize()} Polymarket tracking for this wallet?",
+                            default=True,
+                        ):
+                            wallet_tracker.toggle_polymarket(selected_address)
+                        else:
+                            print_info("No changes made.")
+                    elif sub_choice == "2":
+                        print(
+                            f"\n{theme.PRIMARY}Enter Polymarket proxy wallet address{theme.RESET}"
+                        )
+                        print(
+                            f"{theme.SUBTLE}Leave blank to cancel without changes.{theme.RESET}"
+                        )
+                        proxy_input = input("Proxy address: ").strip()
+                        if not proxy_input:
+                            print_info("Proxy assignment cancelled.")
+                        else:
+                            try:
+                                from web3 import Web3
+
+                                proxy_address = Web3.to_checksum_address(proxy_input)
+                                wallet_tracker.set_polymarket_proxy(
+                                    selected_address, proxy_address
+                                )
+                            except ValueError:
+                                print_error(f"Invalid Ethereum address: {proxy_input}")
+                    elif sub_choice == "3":
+                        if get_yes_no(
+                            "Clear the configured proxy for this wallet?", default=False
+                        ):
+                            wallet_tracker.clear_polymarket_proxy(selected_address)
+                        else:
+                            print_info("Proxy removal cancelled.")
+                    elif sub_choice == "4":
+                        break
+
+        except (ImportError, NameError):
+            print_warning(
+                "Advanced input helpers unavailable. Using simplified Polymarket configuration."
+            )
+            for addr in eth_wallets:
+                status = "enabled" if addr in wallet_tracker.polymarket_enabled else "disabled"
+                proxy = wallet_tracker.polymarket_proxies.get(addr, "None")
+                print(f"{addr}: tracking {status}, proxy {proxy}")
+            addr_input = input("Enter wallet address to toggle (or blank to cancel): ").strip()
+            if not addr_input:
+                print_info("Polymarket configuration cancelled.")
+                return
+            wallet_tracker.toggle_polymarket(addr_input)
+            if addr_input in wallet_tracker.polymarket_enabled:
+                proxy_input = input("Enter proxy wallet address (blank to skip): ").strip()
+                if proxy_input:
+                    wallet_tracker.set_polymarket_proxy(addr_input, proxy_input)
     def _toggle_hyperliquid_enhanced(self, wallet_tracker):
         """Enhanced Hyperliquid toggle with better selection."""
         print_header("Toggle Hyperliquid Tracking")

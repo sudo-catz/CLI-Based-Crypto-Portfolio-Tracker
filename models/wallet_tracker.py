@@ -9,7 +9,7 @@ and associated data across multiple blockchain networks.
 import json
 import os
 import re
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from colorama import Fore, Style
 
 # Import configuration and utilities
@@ -34,9 +34,12 @@ class MultiChainWalletTracker:
         self.wallets: Dict[str, List[str]] = {}
         self.hyperliquid_enabled: List[str] = []
         self.lighter_enabled: List[str] = []
+        self.polymarket_enabled: List[str] = []
+        self.polymarket_proxies: Dict[str, str] = {}
         self.balance_offset: float = 0.0
         self._load_data()  # Load data on initialization
         self._sync_hyperliquid_tracking()
+        self._sync_polymarket_tracking()
 
     def _load_data(self):
         """Loads wallet data, hyperliquid status, and offset from the storage file."""
@@ -52,12 +55,19 @@ class MultiChainWalletTracker:
                     }
                     self.hyperliquid_enabled = data.get("hyperliquid_enabled", [])
                     self.lighter_enabled = data.get("lighter_enabled", [])
+                    self.polymarket_enabled = data.get("polymarket_enabled", [])
+                    raw_proxy_map = data.get("polymarket_proxies", {})
+                    self.polymarket_proxies = (
+                        raw_proxy_map if isinstance(raw_proxy_map, dict) else {}
+                    )
                     self.balance_offset = safe_float_convert(data.get("balance_offset", 0.0))
             except json.JSONDecodeError:
                 print_error(f"Error decoding {self.storage_file}. Initializing with empty data.")
                 self.wallets = default_wallets
                 self.hyperliquid_enabled = []
                 self.lighter_enabled = []
+                self.polymarket_enabled = []
+                self.polymarket_proxies = {}
                 self.balance_offset = 0.0
             except Exception as e:
                 print_error(
@@ -66,12 +76,16 @@ class MultiChainWalletTracker:
                 self.wallets = default_wallets
                 self.hyperliquid_enabled = []
                 self.lighter_enabled = []
+                self.polymarket_enabled = []
+                self.polymarket_proxies = {}
                 self.balance_offset = 0.0
         else:
             print_warning(f"{self.storage_file} not found. Initializing with empty data.")
             self.wallets = default_wallets
             self.hyperliquid_enabled = []
             self.lighter_enabled = []
+            self.polymarket_enabled = []
+            self.polymarket_proxies = {}
             self.balance_offset = 0.0
         # Ensure all supported chains exist as keys after loading
         for chain in SUPPORTED_CHAINS:
@@ -110,7 +124,29 @@ class MultiChainWalletTracker:
                     normalized_lighter.append(checksum)
             self.lighter_enabled = normalized_lighter
 
+            normalized_polymarket = []
+            for addr in self.polymarket_enabled:
+                try:
+                    checksum = Web3.to_checksum_address(addr)
+                except ValueError:
+                    checksum = addr
+                if checksum in normalized_eth and checksum not in normalized_polymarket:
+                    normalized_polymarket.append(checksum)
+            self.polymarket_enabled = normalized_polymarket
+
+            normalized_proxy_map: Dict[str, str] = {}
+            for owner, proxy in self.polymarket_proxies.items():
+                try:
+                    owner_checksum = Web3.to_checksum_address(owner)
+                    proxy_checksum = Web3.to_checksum_address(proxy)
+                except ValueError:
+                    continue
+                if owner_checksum in normalized_eth:
+                    normalized_proxy_map[owner_checksum] = proxy_checksum
+            self.polymarket_proxies = normalized_proxy_map
+
         self._sync_hyperliquid_tracking()
+        self._sync_polymarket_tracking()
 
     def _sync_hyperliquid_tracking(self) -> None:
         """Keep Hyperliquid tracking list in sync with existing Ethereum wallets (no auto-enable)."""
@@ -123,13 +159,32 @@ class MultiChainWalletTracker:
                 seen.add(addr)
         self.hyperliquid_enabled = synced
 
+    def _sync_polymarket_tracking(self) -> None:
+        """Keep Polymarket tracking data in sync with tracked Ethereum wallets."""
+        eth_wallets = set(self.wallets.get("ethereum", []))
+        synced: List[str] = []
+        seen = set()
+        for addr in self.polymarket_enabled:
+            if addr in eth_wallets and addr not in seen:
+                synced.append(addr)
+                seen.add(addr)
+        self.polymarket_enabled = synced
+
+        # Drop proxy mappings for wallets no longer tracked
+        self.polymarket_proxies = {
+            owner: proxy for owner, proxy in self.polymarket_proxies.items() if owner in eth_wallets
+        }
+
     def save_data(self):
         """Saves the current wallet data, hyperliquid status, and offset to the storage file."""
         self._sync_hyperliquid_tracking()
+        self._sync_polymarket_tracking()
         data = {
             "wallets": self.wallets,
             "hyperliquid_enabled": self.hyperliquid_enabled,
             "lighter_enabled": self.lighter_enabled,
+            "polymarket_enabled": self.polymarket_enabled,
+            "polymarket_proxies": self.polymarket_proxies,
             "balance_offset": self.balance_offset,
         }
         try:
@@ -193,6 +248,10 @@ class MultiChainWalletTracker:
                     self.lighter_enabled.remove(address)
                 if address in self.hyperliquid_enabled:
                     self.hyperliquid_enabled.remove(address)
+                if address in self.polymarket_enabled:
+                    self.polymarket_enabled.remove(address)
+                if address in self.polymarket_proxies:
+                    self.polymarket_proxies.pop(address, None)
             self.save_data()
             print_success(f"{chain.capitalize()} wallet removed: {address}")
         else:
@@ -232,6 +291,68 @@ class MultiChainWalletTracker:
         else:
             print_error(f"Address {address} is not in the list of tracked Ethereum wallets.")
 
+    def toggle_polymarket(self, address: str):
+        """Enables or disables Polymarket tracking for a specific Ethereum wallet."""
+        try:
+            address = Web3.to_checksum_address(address)
+        except ValueError:
+            pass
+        if "ethereum" in self.wallets and address in self.wallets["ethereum"]:
+            if address in self.polymarket_enabled:
+                self.polymarket_enabled.remove(address)
+                print_success(f"Polymarket tracking disabled for {address}")
+            else:
+                self.polymarket_enabled.append(address)
+                print_success(f"Polymarket tracking enabled for {address}")
+            self.save_data()
+        else:
+            print_error(f"Address {address} is not in the list of tracked Ethereum wallets.")
+
+    def set_polymarket_proxy(self, owner: str, proxy: str) -> None:
+        """Associates a Polymarket proxy wallet with the specified owner address."""
+        try:
+            owner_checksum = Web3.to_checksum_address(owner)
+        except ValueError:
+            print_error(f"Invalid owner address for Polymarket proxy: {owner}")
+            return
+
+        try:
+            proxy_checksum = Web3.to_checksum_address(proxy)
+        except ValueError:
+            print_error(f"Invalid proxy address for Polymarket tracking: {proxy}")
+            return
+
+        if owner_checksum not in self.wallets.get("ethereum", []):
+            print_error(f"Owner address {owner_checksum} is not a tracked Ethereum wallet.")
+            return
+
+        self.polymarket_proxies[owner_checksum] = proxy_checksum
+        print_success(f"Polymarket proxy set: {owner_checksum} → {proxy_checksum}")
+        self.save_data()
+
+    def clear_polymarket_proxy(self, owner: str) -> None:
+        """Removes the Polymarket proxy mapping for the given owner address."""
+        try:
+            owner_checksum = Web3.to_checksum_address(owner)
+        except ValueError:
+            print_error(f"Invalid owner address for Polymarket proxy removal: {owner}")
+            return
+
+        if owner_checksum in self.polymarket_proxies:
+            self.polymarket_proxies.pop(owner_checksum, None)
+            print_success(f"Polymarket proxy cleared for {owner_checksum}")
+            self.save_data()
+        else:
+            print_warning(f"No Polymarket proxy configured for {owner_checksum}")
+
+    def get_polymarket_proxy(self, owner: str) -> Optional[str]:
+        """Returns the configured Polymarket proxy for the supplied owner address."""
+        try:
+            owner_checksum = Web3.to_checksum_address(owner)
+        except ValueError:
+            owner_checksum = owner
+        return self.polymarket_proxies.get(owner_checksum)
+
     def list_wallets(self):
         """Prints a list of all tracked wallets."""
         if not any(self.wallets.values()):
@@ -250,6 +371,12 @@ class MultiChainWalletTracker:
                         status_labels.append(Fore.GREEN + "Hyperliquid" + Style.RESET_ALL)
                     if chain == "ethereum" and address in self.lighter_enabled:
                         status_labels.append(Fore.CYAN + "Lighter" + Style.RESET_ALL)
+                    if chain == "ethereum" and address in self.polymarket_enabled:
+                        proxy = self.polymarket_proxies.get(address)
+                        if proxy:
+                            status_labels.append(Fore.MAGENTA + "Polymarket" + Style.RESET_ALL)
+                        else:
+                            status_labels.append(Fore.YELLOW + "Polymarket⚠" + Style.RESET_ALL)
                     status_str = " (" + ", ".join(status_labels) + ")" if status_labels else ""
                     print(f"  {i}. {address}{status_str}")
 
@@ -261,5 +388,7 @@ class MultiChainWalletTracker:
             self.wallets,
             hyperliquid_enabled=self.hyperliquid_enabled,
             lighter_enabled=self.lighter_enabled,
+            polymarket_enabled=self.polymarket_enabled,
+            polymarket_proxies=self.polymarket_proxies,
         )
         return await fetcher.get_all_wallets_and_platforms_info()

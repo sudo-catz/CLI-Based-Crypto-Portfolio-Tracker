@@ -48,6 +48,12 @@ HYPERLIQUID_API_URL = "https://api.hyperliquid.xyz/info"
 LIGHTER_API_BASE_URL = "https://mainnet.zklighter.elliot.ai/api/v1"
 LIGHTER_ACCOUNT_ENDPOINT = f"{LIGHTER_API_BASE_URL}/account"
 
+# Polymarket API / RPC Constants
+POLYMARKET_DATA_API_URL = "https://data-api.polymarket.com"
+POLYMARKET_POSITIONS_ENDPOINT = f"{POLYMARKET_DATA_API_URL}/positions"
+POLYGON_RPC_URL = "https://polygon-rpc.com"
+POLYMARKET_USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+
 # Binance API Constants
 BINANCE_BASE_URL = "https://api.binance.com"
 BINANCE_WALLET_BALANCE_ENDPOINT = "/sapi/v1/asset/wallet/balance"

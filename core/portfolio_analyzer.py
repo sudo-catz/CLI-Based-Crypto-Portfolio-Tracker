@@ -370,6 +370,8 @@ class PortfolioAnalyzer:
                 wallet_tracker.wallets,
                 wallet_tracker.hyperliquid_enabled,
                 getattr(wallet_tracker, "lighter_enabled", []),
+                polymarket_enabled=getattr(wallet_tracker, "polymarket_enabled", []),
+                polymarket_proxies=getattr(wallet_tracker, "polymarket_proxies", {}),
                 skip_basic_ethereum=skip_basic_ethereum,
             )
 
@@ -737,6 +739,11 @@ class PortfolioAnalyzer:
                 for info in wallet_data
                 if info.get("platform") == "lighter"
             ),
+            "polymarket": sum(
+                info.get("total_balance", 0.0)
+                for info in wallet_data
+                if info.get("platform") == "polymarket" and not info.get("error")
+            ),
             # Use None for CEX if fetch failed
             "binance": fetched_data.get("binance_total"),  # Can be None
             "okx": fetched_data.get("okx_total"),  # Can be None
@@ -760,6 +767,7 @@ class PortfolioAnalyzer:
             for bal in [
                 balances.get("hyperliquid", 0.0),
                 balances.get("lighter", 0.0),
+                balances.get("polymarket", 0.0),
             ]
             if bal is not None
         )
@@ -866,6 +874,15 @@ class PortfolioAnalyzer:
             if not any(d.get("platform") == "lighter" for d in wallet_data):
                 failed_sources.append("Lighter")
 
+        if any(
+            addr in getattr(wallet_tracker, "polymarket_enabled", [])
+            for addr in wallet_tracker.wallets.get("ethereum", [])
+        ):
+            if not any(
+                d.get("platform") == "polymarket" and not d.get("error") for d in wallet_data
+            ):
+                failed_sources.append("Polymarket")
+
         metrics = {
             "timestamp": fetched_data.get(
                 "timestamp", datetime.now(timezone.utc).isoformat()
@@ -917,6 +934,7 @@ class PortfolioAnalyzer:
                 "solana_balance": balances.get("solana", 0),
                 "hyperliquid_balance": balances.get("hyperliquid", 0),
                 "lighter_balance": balances.get("lighter", 0),
+                "polymarket_balance": balances.get("polymarket", 0),
             }
 
             exposure_analysis = exposure_tracker.analyze_portfolio_exposure(

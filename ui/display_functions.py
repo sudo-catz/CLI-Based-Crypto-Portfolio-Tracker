@@ -732,41 +732,31 @@ def display_comprehensive_overview(metrics: Dict[str, Any], source_info: str = "
         adjusted_value_with_pnl = adjusted_value + recomputed_pnl
 
     # ------------------------------------------------------------------
-    # Original detailed portfolio value output retained for reference.
-    # Commented out per user request to shorten GitHub-facing displays.
-    #
-    # print(f"Total Value (spot):      {theme.ACCENT}{format_currency(total_value)}{theme.RESET}")
-    # if total_value_with_pnl is not None:
-    #     print(f"Total Value (with PnL):  {theme.ACCENT}{format_currency(total_value_with_pnl)}{theme.RESET}")
-    #     if abs(recomputed_pnl) > 1e-6:
-    #         pnl_color = theme.SUCCESS if recomputed_pnl >= 0 else theme.ERROR
-    #         print(f"  └─ Unrealized PnL: {pnl_color}{format_currency(recomputed_pnl)}{theme.RESET}")
-    #
-    # if offset > 0:
-    #     print(f"Applied Offset:          {theme.WARNING}-{format_currency(offset)}{theme.RESET}")
-    #     print(f"Net Portfolio (spot):    {theme.SUCCESS}{format_currency(adjusted_value)}{theme.RESET}")
-    #     if adjusted_value_with_pnl is not None:
-    #         print(f"Net Portfolio (with PnL): {theme.SUCCESS}{format_currency(adjusted_value_with_pnl)}{theme.RESET}")
-    # else:
-    #     print(f"Applied Offset:          {theme.SUBTLE}{format_currency(offset)}{theme.RESET}")
-    #     print(f"Net Portfolio (spot):    {theme.SUCCESS}{format_currency(adjusted_value)}{theme.RESET}")
-    #     if adjusted_value_with_pnl is not None:
-    #         print(f"Net Portfolio (with PnL): {theme.SUCCESS}{format_currency(adjusted_value_with_pnl)}{theme.RESET}")
-    # ------------------------------------------------------------------
-
-    display_total = total_value_with_pnl if total_value_with_pnl is not None else total_value
-    display_net = adjusted_value_with_pnl if adjusted_value_with_pnl is not None else adjusted_value
-
-    print(f"Total Value: {format_currency(display_total, color=theme.ACCENT)}")
+    # Detailed portfolio value output.
+    print(f"Total Value (spot):      {theme.ACCENT}{format_currency(total_value)}{theme.RESET}")
+    if total_value_with_pnl is not None:
+        print(
+            f"Total Value (with PnL):  {theme.ACCENT}{format_currency(total_value_with_pnl)}{theme.RESET}"
+        )
+        if abs(recomputed_pnl) > 1e-6:
+            pnl_color = theme.SUCCESS if recomputed_pnl >= 0 else theme.ERROR
+            print(f"  └─ Unrealized PnL: {pnl_color}{format_currency(recomputed_pnl)}{theme.RESET}")
 
     if offset > 0:
-        offset_str = f"-{format_currency(offset, color=theme.WARNING)}"
+        print(f"Applied Offset:          {theme.WARNING}-{format_currency(offset)}{theme.RESET}")
+        print(f"Net Portfolio (spot):    {theme.SUCCESS}{format_currency(adjusted_value)}{theme.RESET}")
+        if adjusted_value_with_pnl is not None:
+            print(
+                f"Net Portfolio (with PnL): {theme.SUCCESS}{format_currency(adjusted_value_with_pnl)}{theme.RESET}"
+            )
     else:
-        offset_color = theme.SUBTLE if offset == 0 else theme.SUCCESS
-        offset_str = format_currency(offset, color=offset_color)
-    print(f"Applied Offset: {offset_str}")
-
-    print(f"Net Portfolio: {format_currency(display_net, color=theme.SUCCESS)}")
+        print(f"Applied Offset:          {theme.SUBTLE}{format_currency(offset)}{theme.RESET}")
+        print(f"Net Portfolio (spot):    {theme.SUCCESS}{format_currency(adjusted_value)}{theme.RESET}")
+        if adjusted_value_with_pnl is not None:
+            print(
+                f"Net Portfolio (with PnL): {theme.SUCCESS}{format_currency(adjusted_value_with_pnl)}{theme.RESET}"
+            )
+    # ------------------------------------------------------------------
 
     # --- Distribution Summary ---
     total_cex = metrics.get("total_cex_balance", 0.0)
@@ -808,6 +798,7 @@ def display_comprehensive_overview(metrics: Dict[str, Any], source_info: str = "
         "Solana",
         "Hyperliquid",
         "Lighter",
+        "Polymarket",
     ]
     grand_total_for_perc = total_value if total_value > 0 else 1
 
@@ -3317,6 +3308,150 @@ def display_perp_dex_positions(portfolio_metrics: Dict[str, Any]):
     print()  # Final spacing
 
 
+def display_polymarket_positions(portfolio_metrics: Dict[str, Any]):
+    """Display Polymarket prediction market positions grouped by owner."""
+    wallet_platform_data = portfolio_metrics.get("wallet_platform_data_raw", []) or []
+    polymarket_accounts = [
+        info for info in wallet_platform_data if info.get("platform") == "polymarket"
+    ]
+
+    if not polymarket_accounts:
+        print_header("Polymarket Positions")
+        print(
+            f"{theme.SUBTLE}No Polymarket proxies configured or no positions available.{theme.RESET}"
+        )
+        print(
+            f"{theme.INFO}💡 Configure proxies via Manage Wallets → Configure Polymarket to enable tracking.{theme.RESET}"
+        )
+        return
+
+    valid_accounts = [acct for acct in polymarket_accounts if not acct.get("error")]
+    total_value = sum(
+        safe_float_convert(acct.get("total_balance", 0.0)) for acct in valid_accounts
+    )
+    print_header("Polymarket Positions")
+    print(f"\n{theme.PRIMARY}🎯 POLYMARKET SUMMARY{theme.RESET}")
+    print(f"{theme.SUBTLE}{'─' * 26}{theme.RESET}")
+    print(f"Tracked Owners:    {theme.ACCENT}{len(polymarket_accounts)}{theme.RESET}")
+    print(f"Active Portfolios: {theme.ACCENT}{len(valid_accounts)}{theme.RESET}")
+    print(f"Total Value:       {theme.SUCCESS}{format_currency(total_value)}{theme.RESET}")
+
+    missing_proxy_count = sum(
+        1 for acct in polymarket_accounts if acct.get("error") == "proxy_not_configured"
+    )
+    if missing_proxy_count:
+        print(
+            f"{theme.WARNING}⚠️  {missing_proxy_count} wallet(s) missing proxy configuration.{theme.RESET}"
+        )
+
+    for idx, account in enumerate(polymarket_accounts, start=1):
+        owner = account.get("address", "N/A") or "N/A"
+        proxy = account.get("proxy") or account.get("proxy_address") or "N/A"
+        owner_short = owner[:8] + "..." + owner[-6:] if owner != "N/A" else owner
+        proxy_short = proxy[:8] + "..." + proxy[-6:] if proxy != "N/A" else proxy
+        error_state = account.get("error")
+
+        print(
+            f"\n{theme.PRIMARY}📊 OWNER {idx}: {theme.ACCENT}{owner_short}{theme.RESET} "
+            f"{theme.SUBTLE}(Proxy {proxy_short}){theme.RESET}"
+        )
+        print(f"{theme.SUBTLE}{'─' * (20 + len(owner_short))}{theme.RESET}")
+
+        if error_state:
+            if error_state == "proxy_not_configured":
+                print(
+                    f"{theme.WARNING}⚠️  Proxy not configured. Add the proxy wallet in Manage Wallets → Configure Polymarket.{theme.RESET}"
+                )
+            else:
+                print(
+                    f"{theme.WARNING}⚠️  Unable to load data for this proxy. Please retry later.{theme.RESET}"
+                )
+            continue
+
+        total_balance = safe_float_convert(account.get("total_balance", 0.0))
+        usdc_balance = safe_float_convert(account.get("usdc_balance", 0.0))
+        positions_value = safe_float_convert(account.get("positions_value", 0.0))
+        metadata = account.get("metadata", {}) or {}
+        cash_pnl_total = safe_float_convert(metadata.get("cash_pnl", 0.0))
+        unrealized_pnl = safe_float_convert(metadata.get("unrealized_pnl", 0.0))
+
+        print(f"Total Value:     {theme.SUCCESS}{format_currency(total_balance)}{theme.RESET}")
+        print(f"Positions Value: {theme.ACCENT}{format_currency(positions_value)}{theme.RESET}")
+        print(f"USDC Balance:    {theme.ACCENT}{format_currency(usdc_balance)}{theme.RESET}")
+        show_realized = (
+            abs(cash_pnl_total) > 1e-6 and abs(cash_pnl_total - unrealized_pnl) > 1e-6
+        )
+        if show_realized:
+            pnl_color = theme.SUCCESS if cash_pnl_total >= 0 else theme.ERROR
+            print(f"Realized PnL:   {pnl_color}{format_currency(cash_pnl_total)}{theme.RESET}")
+        unrealized_color = theme.SUCCESS if unrealized_pnl >= 0 else theme.ERROR
+        print(f"Unrealized PnL: {unrealized_color}{format_currency(unrealized_pnl)}{theme.RESET}")
+
+        positions = account.get("positions", []) or []
+        if not positions:
+            print(f"\n{theme.SUBTLE}No active Polymarket positions{theme.RESET}")
+            continue
+
+        headers = [
+            f"{theme.PRIMARY}Market{theme.RESET}",
+            f"{theme.PRIMARY}Outcome{theme.RESET}",
+            f"{theme.PRIMARY}Size{theme.RESET}",
+            f"{theme.PRIMARY}Avg Price{theme.RESET}",
+            f"{theme.PRIMARY}Mark{theme.RESET}",
+            f"{theme.PRIMARY}Current Value{theme.RESET}",
+            f"{theme.PRIMARY}Cash PnL{theme.RESET}",
+            f"{theme.PRIMARY}Status{theme.RESET}",
+        ]
+        table_rows: List[List[str]] = []
+
+        for position in positions:
+            title = position.get("title") or position.get("slug") or "Unknown Market"
+            outcome = position.get("outcome", "—")
+            size = safe_float_convert(position.get("size", 0.0))
+            avg_price = safe_float_convert(position.get("avg_price", 0.0))
+            current_price = safe_float_convert(position.get("current_price", 0.0))
+            current_value = safe_float_convert(position.get("current_value", 0.0))
+            cash_pnl = safe_float_convert(position.get("cash_pnl", 0.0))
+            redeemable = bool(position.get("redeemable"))
+            end_date = position.get("end_date")
+
+            status_parts = []
+            if redeemable:
+                status_parts.append("Redeemable")
+            elif current_value > 0:
+                status_parts.append("Active")
+            else:
+                status_parts.append("Settled")
+            if end_date:
+                status_parts.append(end_date)
+            status = " • ".join(status_parts)
+
+            table_rows.append(
+                [
+                    f"{theme.ACCENT}{title}{theme.RESET}",
+                    outcome,
+                    f"{size:,.3f}",
+                    f"{avg_price:.4f}",
+                    f"{current_price:.4f}",
+                    format_currency(current_value),
+                    format_currency(cash_pnl),
+                    status,
+                ]
+            )
+
+        print(
+            tabulate(
+                table_rows,
+                headers=headers,
+                tablefmt="rounded_grid",
+                numalign="right",
+                stralign="left",
+            )
+        )
+
+    print()
+
+
 def display_hyperliquid_positions(portfolio_metrics: Dict[str, Any]):
     """Enhanced Hyperliquid positions display with improved formatting and theming."""
     print_header("Hyperliquid Positions")
@@ -4364,6 +4499,8 @@ def _display_main_exposure_analysis(portfolio_metrics: Dict[str, Any]):
         adjusted_non_stable_pct = 0
         adjusted_neutral_pct = 0 if has_neutral else 0
 
+    offset = safe_float_convert(balance_offset)
+
     print(f"Portfolio Sum:      {theme.ACCENT}{format_currency(portfolio_sum)}{theme.RESET}")
 
     if balance_offset != 0:
@@ -4374,6 +4511,12 @@ def _display_main_exposure_analysis(portfolio_metrics: Dict[str, Any]):
     else:
         print(
             f"Stable Assets:      {theme.SUCCESS}{format_currency(adjusted_stable_value)}{theme.RESET} {theme.SUBTLE}({safe_float_convert(adjusted_stable_pct):.1f}%){theme.RESET}"
+        )
+
+    if offset != 0:
+        offset_prefix = "-" if offset > 0 else "+"
+        print(
+            f"{offset_prefix} Offsets: {format_currency(abs(offset), color=theme.WARNING if offset > 0 else theme.SUCCESS)}"
         )
 
     print(
@@ -4393,18 +4536,45 @@ def _display_main_exposure_analysis(portfolio_metrics: Dict[str, Any]):
 
     margin_exposure_breakdown.sort(key=lambda entry: entry.get("exposure", 0.0), reverse=True)
 
+    polymarket_entry = (
+        consolidated_assets.get("POLYMARKET_POSITIONS")
+        or non_stable_assets.get("POLYMARKET_POSITIONS")
+    )
+    polymarket_exposure = safe_float_convert(
+        polymarket_entry.get("total_value_usd", 0.0) if polymarket_entry else 0.0
+    )
+    polymarket_exposure = max(polymarket_exposure, 0.0)
+
     total_exposure = non_margin_non_stable + total_margin_exposure
+    total_exposure_ex_poly = max(total_exposure - polymarket_exposure, 0.0)
     total_exposure_pct = (total_exposure / portfolio_sum * 100) if portfolio_sum > 0 else 0.0
+    total_exposure_ex_poly_pct = (
+        (total_exposure_ex_poly / portfolio_sum * 100) if portfolio_sum > 0 else 0.0
+    )
     print(
         f"Total Exposure:     {theme.ACCENT}{format_currency(total_exposure)}{theme.RESET} "
         f"{theme.SUBTLE}({total_exposure_pct:.1f}% of portfolio){theme.RESET}"
     )
+    if polymarket_exposure > 0:
+        print(
+            f"{theme.SUBTLE}   ↳ Excl. Polymarket:{theme.RESET} "
+            f"{theme.ACCENT}{format_currency(total_exposure_ex_poly)}{theme.RESET} "
+            f"{theme.SUBTLE}({total_exposure_ex_poly_pct:.1f}% of portfolio){theme.RESET}"
+        )
     if non_margin_non_stable > 0 or margin_exposure_breakdown:
         print(f"{theme.SUBTLE}   Exposure Breakdown:{theme.RESET}")
         if non_margin_non_stable > 0:
             print(
                 f"    • Spot & other: {theme.ACCENT}{format_currency(non_margin_non_stable)}{theme.RESET}"
             )
+            if polymarket_exposure > 0:
+                other_spot = max(non_margin_non_stable - polymarket_exposure, 0.0)
+                print(
+                    f"      ├─ Polymarket markets: {theme.ACCENT}{format_currency(polymarket_exposure)}{theme.RESET}"
+                )
+                print(
+                    f"      └─ Other spot assets: {theme.ACCENT}{format_currency(other_spot)}{theme.RESET}"
+                )
         for entry in margin_exposure_breakdown:
             net_qty = safe_float_convert(entry.get("net_qty", 0.0))
             abs_qty = safe_float_convert(entry.get("abs_qty", 0.0))

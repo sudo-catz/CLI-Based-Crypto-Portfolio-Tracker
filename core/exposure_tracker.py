@@ -771,6 +771,45 @@ class ExposureTracker:
                     symbol_key="symbol",
                     value_key="position_value",
                 )
+            elif platform == "polymarket":
+                account_value = safe_float_convert(wallet_info.get("total_balance", 0))
+                usdc_balance = safe_float_convert(wallet_info.get("usdc_balance", 0))
+                positions_value = safe_float_convert(
+                    wallet_info.get("positions_value", account_value - usdc_balance)
+                )
+                positions_value = max(positions_value, 0.0)
+
+                if usdc_balance > 0.01:
+                    self._add_to_consolidated(
+                        consolidated,
+                        "USDC",
+                        usdc_balance,
+                        usdc_balance,
+                        "Polymarket",
+                        crypto_prices,
+                        metadata={
+                            "source_platform": "Polymarket",
+                            "force_is_stable": True,
+                        },
+                    )
+
+                residual_value = max(account_value - usdc_balance, 0.0)
+                # Prefer explicit positions_value if provided, otherwise use residual
+                market_value = positions_value if positions_value > 0.01 else residual_value
+                if market_value > 0.01:
+                    self._add_to_consolidated(
+                        consolidated,
+                        "POLYMARKET_POSITIONS",
+                        0,
+                        market_value,
+                        "Polymarket",
+                        crypto_prices,
+                        metadata={
+                            "source_platform": "Polymarket",
+                            "category": "prediction_market",
+                            "is_prediction_market": True,
+                        },
+                    )
             else:
                 # Check for hyperliquid data nested within wallet info
                 hyperliquid_data = wallet_info.get("hyperliquid", {})

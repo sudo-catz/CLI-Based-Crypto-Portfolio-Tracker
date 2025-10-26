@@ -21,6 +21,7 @@ A terminal-first cryptocurrency portfolio tracker that consolidates balances acr
 ### DeFi Platforms
 - **Hyperliquid** (Perpetual trading positions)
 - **Lighter** (Perp DEX account balances + open positions)
+- **Polymarket** (Prediction market portfolios via proxy wallets)
 
 ### Key Capabilities
 - 📊 Exposure analysis with asset concentration breakdown
@@ -98,7 +99,7 @@ Once the app loads, the main menu offers:
 1. **🚀 Run FULL Portfolio Analysis** – full wallet scraping (DeBank, RPC, Hyperliquid, Lighter) with exposure refresh
 2. **⚡ Run QUICK Portfolio Analysis** – skip heavier wallet scraping for a rapid snapshot
 3. **📊 View Past Analysis** – list, open, refresh, combine, or delete saved analyses (`d<number>` deletes, `cleanup` trims to newest 10)
-4. **🏦 Manage Wallets** – add/remove wallets and toggle Hyperliquid/Lighter per Ethereum address
+4. **🏦 Manage Wallets** – add/remove wallets, toggle Hyperliquid/Lighter, and configure Polymarket proxies per Ethereum address
 5. **🔑 Manage API Keys** – encrypted credential storage guarded by your master password
 6. **🪙 Manage Custom Coins** – register additional tickers, inspect tracked coins, prune entries, and test live pricing
 7. **⚖️ Adjust Balance Offset** – set a portfolio offset for loans, liabilities, or off-ledger funds

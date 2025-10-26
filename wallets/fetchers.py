@@ -54,6 +54,8 @@ class WalletPlatformFetcher:
         wallets: Dict[str, List[str]],
         hyperliquid_enabled: List[str],
         lighter_enabled: List[str],
+        polymarket_enabled: Optional[List[str]] = None,
+        polymarket_proxies: Optional[Dict[str, str]] = None,
         skip_basic_ethereum: bool = False,
     ):
         """Initialize with wallet data from MultiChainWalletTracker."""
@@ -68,6 +70,21 @@ class WalletPlatformFetcher:
         self.lighter_enabled = list(lighter_enabled) if lighter_enabled else []
         if self.lighter_enabled:
             self.lighter_enabled = list(dict.fromkeys(self.lighter_enabled))
+        self.polymarket_enabled = (
+            list(polymarket_enabled) if polymarket_enabled else []
+        )
+        if self.polymarket_enabled:
+            self.polymarket_enabled = list(dict.fromkeys(self.polymarket_enabled))
+        raw_proxy_map = dict(polymarket_proxies) if polymarket_proxies else {}
+        normalized_proxy_map: Dict[str, str] = {}
+        for owner, proxy in raw_proxy_map.items():
+            try:
+                owner_checksum = Web3.to_checksum_address(owner)
+                proxy_checksum = Web3.to_checksum_address(proxy)
+            except ValueError:
+                continue
+            normalized_proxy_map[owner_checksum] = proxy_checksum
+        self.polymarket_proxies = normalized_proxy_map
         self.skip_basic_ethereum = skip_basic_ethereum
 
     async def _run_sync_in_thread(self, func, *args):
@@ -446,6 +463,169 @@ class WalletPlatformFetcher:
             return None
 
         return await self._run_sync_in_thread(fetch_lighter_sync, address)
+
+    def _fetch_polygon_token_balance(self, account: str, token_address: str, decimals: int) -> float:
+        """Fetch ERC-20 token balance on Polygon using a lightweight eth_call."""
+        try:
+            account_checksum = Web3.to_checksum_address(account)
+            token_checksum = Web3.to_checksum_address(token_address)
+        except ValueError:
+            return 0.0
+
+        data_field = "0x70a08231" + account_checksum[2:].rjust(64, "0")
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_call",
+            "params": [{"to": token_checksum, "data": data_field}, "latest"],
+        }
+        try:
+            response = requests.post(POLYGON_RPC_URL, json=payload, timeout=20)
+            response.raise_for_status()
+            result = response.json().get("result")
+            if not result:
+                return 0.0
+            raw_value = int(result, 16)
+            divisor = 10 ** decimals
+            return raw_value / divisor if divisor else float(raw_value)
+        except requests.exceptions.RequestException as exc:
+            print_error(f"Error fetching Polygon token balance: {exc}")
+        except (ValueError, TypeError):
+            print_warning(
+                "Unexpected response while parsing Polygon token balance for Polymarket."
+            )
+        return 0.0
+
+    @cached_wallet_data(ttl=CACHE_TTL_MEDIUM)
+    async def get_polymarket_account_info(self, owner_address: str) -> Optional[Dict[str, Any]]:
+        """Fetch Polymarket positions and USDC balances for a tracked owner wallet."""
+
+        def fetch_polymarket_sync(owner: str) -> Optional[Dict[str, Any]]:
+            try:
+                owner_checksum = Web3.to_checksum_address(owner)
+            except ValueError:
+                owner_checksum = owner
+
+            proxy_address = (
+                self.polymarket_proxies.get(owner_checksum)
+                or self.polymarket_proxies.get(owner_checksum.lower())
+            )
+            if not proxy_address:
+                print_warning(
+                    f"Polymarket proxy not configured for owner {owner_checksum[:8]}.... Skipping."
+                )
+                return {
+                    "platform": "polymarket",
+                    "address": owner_checksum,
+                    "proxy": None,
+                    "total_balance": 0.0,
+                    "usdc_balance": 0.0,
+                    "positions_value": 0.0,
+                    "positions": [],
+                    "error": "proxy_not_configured",
+                    "source": "Polymarket Data API",
+                }
+
+            try:
+                proxy_checksum = Web3.to_checksum_address(proxy_address)
+            except ValueError:
+                print_error(
+                    f"Invalid proxy address configured for Polymarket owner {owner_checksum}"
+                )
+                return {
+                    "platform": "polymarket",
+                    "address": owner_checksum,
+                    "proxy": proxy_address,
+                    "total_balance": 0.0,
+                    "usdc_balance": 0.0,
+                    "positions_value": 0.0,
+                    "positions": [],
+                    "error": "invalid_proxy",
+                    "source": "Polymarket Data API",
+                }
+
+            try:
+                response = requests.get(
+                    POLYMARKET_POSITIONS_ENDPOINT,
+                    params={"user": proxy_checksum},
+                    timeout=20,
+                )
+                response.raise_for_status()
+                positions_data = response.json()
+                if not isinstance(positions_data, list):
+                    raise ValueError("Unexpected Polymarket response structure")
+            except requests.exceptions.RequestException as exc:
+                print_error(
+                    f"HTTP error fetching Polymarket positions for {proxy_checksum[:8]}...: {exc}"
+                )
+                return None
+            except ValueError as exc:
+                print_error(f"Error parsing Polymarket response: {exc}")
+                return None
+
+            normalized_positions: List[Dict[str, Any]] = []
+            total_current_value = 0.0
+            total_initial_value = 0.0
+            total_cash_pnl = 0.0
+
+            for position in positions_data:
+                if not isinstance(position, dict):
+                    continue
+                current_val = safe_float_convert(position.get("currentValue", 0.0))
+                initial_val = safe_float_convert(position.get("initialValue", 0.0))
+                cash_pnl = safe_float_convert(position.get("cashPnl", 0.0))
+                redeemable_flag = bool(position.get("redeemable"))
+                # Filter out settled/redeemable positions with no remaining value
+                if redeemable_flag and current_val <= 0.01:
+                    continue
+
+                normalized_positions.append(
+                    {
+                        "title": position.get("title"),
+                        "slug": position.get("slug"),
+                        "outcome": position.get("outcome"),
+                        "size": safe_float_convert(position.get("size", 0.0)),
+                        "avg_price": safe_float_convert(position.get("avgPrice", 0.0)),
+                        "current_price": safe_float_convert(position.get("curPrice", 0.0)),
+                        "current_value": current_val,
+                        "initial_value": initial_val,
+                        "cash_pnl": cash_pnl,
+                        "percent_pnl": safe_float_convert(position.get("percentPnl", 0.0)),
+                        "redeemable": redeemable_flag,
+                        "mergeable": bool(position.get("mergeable")),
+                        "end_date": position.get("endDate"),
+                        "condition_id": position.get("conditionId"),
+                        "asset": position.get("asset"),
+                    }
+                )
+                total_current_value += current_val
+                total_initial_value += initial_val
+                total_cash_pnl += cash_pnl
+
+            usdc_balance = self._fetch_polygon_token_balance(
+                proxy_checksum, POLYMARKET_USDC_CONTRACT, 6
+            )
+            total_balance = total_current_value + usdc_balance
+            unrealized_pnl = total_current_value - total_initial_value
+
+            return {
+                "platform": "polymarket",
+                "address": owner_checksum,
+                "proxy": proxy_checksum,
+                "total_balance": total_balance,
+                "positions_value": total_current_value,
+                "usdc_balance": usdc_balance,
+                "positions": normalized_positions,
+                "metadata": {
+                    "initial_value": total_initial_value,
+                    "cash_pnl": total_cash_pnl,
+                    "unrealized_pnl": unrealized_pnl,
+                },
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "source": "Polymarket Data API",
+            }
+
+        return await self._run_sync_in_thread(fetch_polymarket_sync, owner_address)
 
     async def get_ethereum_wallet_info(self, address: str) -> Optional[Dict[str, Any]]:
         """
@@ -842,6 +1022,9 @@ class WalletPlatformFetcher:
                         any_tasks = True
                     if chain == "ethereum" and address in self.lighter_enabled:
                         tasks.append(self.get_lighter_account_info(address))
+                        any_tasks = True
+                    if chain == "ethereum" and address in self.polymarket_enabled:
+                        tasks.append(self.get_polymarket_account_info(address))
                         any_tasks = True
 
         if not any_tasks:
