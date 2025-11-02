@@ -2,8 +2,6 @@
 
 A terminal-first cryptocurrency portfolio tracker that consolidates balances across centralized exchanges (CEXs) and on-chain wallets, plus selected DeFi platforms.  
 
-## 📦 Repository
-- GitHub: https://github.com/sudo-catz/CLI-Based-Crypto-Portfolio-Tracker
 
 ## 🚀 Features
 
