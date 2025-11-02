@@ -92,7 +92,7 @@ def combine_wallet_data(
                     "source_wallets": [wallet_address],
                 }
 
-        # Combine protocols
+            # Combine protocols
         protocols = wallet_data.get("protocols", [])
         for protocol in protocols:
             if not isinstance(protocol, dict):
@@ -119,6 +119,16 @@ def combine_wallet_data(
                 # Add wallet source to position
                 position_copy = position.copy()
                 position_copy["source_wallet"] = wallet_address
+                # Normalize Polymarket prediction entries
+                if (
+                    protocol_name.lower() == "polymarket"
+                    and str(position_copy.get("header_type", "")).lower() == "name"
+                ):
+                    outcome_value = position_copy.get("asset") or position_copy.get("label")
+                    if outcome_value:
+                        position_copy["side"] = outcome_value
+                    position_copy["asset"] = "Polymarket Position"
+                    position_copy.setdefault("metadata", {})["source"] = "DeBank"
                 combined_positions[key].append(position_copy)
 
             # Update protocol metadata

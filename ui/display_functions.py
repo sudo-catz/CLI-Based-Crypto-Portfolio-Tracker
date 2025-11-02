@@ -1114,7 +1114,14 @@ def display_asset_distribution(metrics: Dict[str, Any]):
 
     # Simple table with grid format for perfect alignment
     headers = ["Platform", "Value", "Distribution", "Share"]
-    print(f"\n{tabulate(table_data, headers=headers, tablefmt='grid')}")
+    print(
+        "\n"
+        + tabulate(
+            table_data,
+            headers=headers,
+            tablefmt="rounded_grid",
+        )
+    )
 
     # Simple summary
     largest_allocation = max(chart_data, key=lambda x: x[2])
@@ -1141,16 +1148,25 @@ def display_wallet_balances(portfolio_metrics: Dict[str, Any]):
     # Keep only chain-specific wallet entries for the main table
     wallet_platform_data = [entry for entry in wallet_platform_data_raw if entry.get("chain")]
 
-    # Calculate total balance across all wallets
-    total_all_wallets_usd = sum(
-        (
-            info.get("total_balance_usd", 0.0)
-            if info.get("chain") == "solana"
-            else info.get("total_balance", 0.0)
-        )
-        or 0.0
-        for info in wallet_platform_data
-    )
+    def _display_wallet_balance(info: Dict[str, Any]) -> float:
+        if "total_balance_original" in info:
+            return safe_float_convert(info.get("total_balance_original", 0.0))
+
+        if info.get("chain") == "solana":
+            base_balance = safe_float_convert(info.get("total_balance_usd", 0.0))
+        else:
+            base_balance = safe_float_convert(info.get("total_balance", 0.0))
+
+        # If Hyperliquid deductions were applied but we didn't capture an original total, add them back
+        adjustments = info.get("adjustments") if isinstance(info.get("adjustments"), dict) else {}
+        hyper_deduction = safe_float_convert(adjustments.get("hyperliquid_deduction", 0.0))
+        if hyper_deduction and "total_balance_original" not in info:
+            base_balance += hyper_deduction
+
+        return base_balance
+
+    # Calculate total balance across all wallets (use original totals when available)
+    total_all_wallets_usd = sum(_display_wallet_balance(info) for info in wallet_platform_data)
 
     # Enhanced header with emoji and better formatting
     print(f"\n{theme.PRIMARY}💼 PLATFORM OVERVIEW{theme.RESET}")
@@ -1176,12 +1192,9 @@ def display_wallet_balances(portfolio_metrics: Dict[str, Any]):
     table_data = []
     ethereum_wallets = []
 
-    def _wallet_balance(info: Dict[str, Any]) -> float:
-        if info.get("chain") == "solana":
-            return safe_float_convert(info.get("total_balance_usd", 0.0))
-        return safe_float_convert(info.get("total_balance", 0.0))
-
-    wallet_platform_data_sorted = sorted(wallet_platform_data, key=_wallet_balance, reverse=True)
+    wallet_platform_data_sorted = sorted(
+        wallet_platform_data, key=_display_wallet_balance, reverse=True
+    )
 
     for info in wallet_platform_data_sorted:
         chain = info.get("chain", "unknown")
@@ -1195,14 +1208,8 @@ def display_wallet_balances(portfolio_metrics: Dict[str, Any]):
             else:
                 address_short = address[:8] + "..." + address[-6:]
 
-        # Use the correct balance key depending on the chain
-        balance_usd = (
-            info.get("total_balance_usd", 0.0)
-            if chain == "solana"
-            else info.get("total_balance", 0.0)
-        )
-        # Ensure balance_usd is not None
-        balance_usd = balance_usd or 0.0
+        # Use original balance when available to reflect true holdings
+        balance_usd = _display_wallet_balance(info)
         percentage = (
             (balance_usd / total_all_wallets_usd) * 100
             if total_all_wallets_usd > 0 and balance_usd
@@ -1211,7 +1218,17 @@ def display_wallet_balances(portfolio_metrics: Dict[str, Any]):
 
         # Chain-specific details formatting with enhanced styling
         if chain == "ethereum":
-            native_balance_str = f"{theme.ERROR}Not Available{theme.RESET}"
+            native_amount = None
+            if "native_balance" in info:
+                native_amount = safe_float_convert(info.get("native_balance"))
+            elif "balance_eth" in info:
+                native_amount = safe_float_convert(info.get("balance_eth"))
+
+            if native_amount is not None:
+                native_symbol = info.get("native_symbol", "ETH")
+                native_balance_str = f"{theme.PRIMARY}{native_amount:.4f} {native_symbol}{theme.RESET}"
+            else:
+                native_balance_str = f"{theme.ERROR}Not Available{theme.RESET}"
             token_count = info.get("token_count", "?")
             protocol_count = info.get("protocol_count", "?")
             details_str = f"Tokens: {theme.ACCENT}{token_count}{theme.RESET}, Protocols: {theme.ACCENT}{protocol_count}{theme.RESET}"
@@ -1543,7 +1560,7 @@ def _display_wallet_summary_stats(
 ):
     """Helper function to display summary statistics for a wallet."""
     from utils.display_theme import theme
-    from utils.helpers import format_currency
+    from utils.helpers import format_currency, safe_float_convert
 
     # Initialize variable to prevent UnboundLocalError
     has_negative_protocols = False
@@ -1977,6 +1994,17 @@ def _display_complete_wallet_details(
 
     tokens = wallet_data.get("tokens", [])
     protocols = wallet_data.get("protocols", [])
+    wallet_platform_data_raw = portfolio_metrics.get("wallet_platform_data_raw", []) or []
+    polymarket_platform_map = {}
+    for entry in wallet_platform_data_raw:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("platform", "")).lower() != "polymarket":
+            continue
+        owner = entry.get("address")
+        if not isinstance(owner, str):
+            continue
+        polymarket_platform_map[owner.lower()] = entry
 
     # Sort data once
     sorted_tokens = sorted(tokens, key=lambda t: t.get("usd_value", 0), reverse=True)
@@ -2636,6 +2664,25 @@ def _display_complete_wallet_details(
                                 asset = pos.get("asset", "")
                                 ptype = pos.get("header_type", "") or "-"
                                 usd_val = pos.get("usd_value", pos.get("value", 0))
+
+                                if name.lower() == "polymarket":
+                                    raw_lines = [
+                                        line.strip()
+                                        for line in (pos.get("raw_row_text") or "").split("\n")
+                                        if line and line.strip()
+                                    ]
+                                    if ptype.lower() == "name":
+                                        outcome = asset or (raw_lines[1] if len(raw_lines) > 1 else "—")
+                                        amount_text = raw_lines[2] if len(raw_lines) > 2 else ""
+                                        side_label = outcome if outcome else "Position"
+                                        if amount_text:
+                                            asset = f"Polymarket Position • {amount_text} ({side_label})"
+                                        else:
+                                            asset = f"Polymarket Position ({side_label})"
+                                        ptype = "Prediction"
+                                    elif ptype.lower() == "pool":
+                                        ptype = "Deposit"
+
                                 rows.append([label, asset, ptype, format_currency(usd_val)])
                             print(
                                 _tab(
@@ -2646,6 +2693,73 @@ def _display_complete_wallet_details(
                             )
                         else:
                             print(f"{theme.SUBTLE}No positions found{theme.RESET}")
+
+                        # Supplement Polymarket protocol with API positions when available
+                    if name.lower() == "polymarket":
+                        pm_entry = polymarket_platform_map.get(address.lower())
+                        if pm_entry and not pm_entry.get("error"):
+                            pm_positions = pm_entry.get("positions") or []
+                            if pm_positions:
+                                print(
+                                    f"{theme.INFO}Polymarket API positions (proxy {proxy_short}){theme.RESET}"
+                                )
+                                pm_rows = []
+                                for pos in pm_positions:
+                                    prediction = pos.get("title") or pos.get("slug") or "Unnamed Market"
+                                    side = pos.get("outcome") or "—"
+                                    size = safe_float_convert(
+                                        pos.get("size", pos.get("position", 0.0)), 0.0
+                                    )
+                                    avg_entry = safe_float_convert(
+                                        pos.get("avg_price", pos.get("avgPrice", 0.0)), 0.0
+                                    )
+                                    mark_price = safe_float_convert(
+                                        pos.get("current_price", pos.get("curPrice", 0.0)), 0.0
+                                    )
+                                    usd_val = safe_float_convert(
+                                        pos.get("current_value", pos.get("usd_value", 0.0)), 0.0
+                                    )
+                                    pnl_val = safe_float_convert(
+                                        pos.get("cash_pnl", pos.get("cashPnl", 0.0)), 0.0
+                                    )
+                                    deadline = pos.get("end_date") or pos.get("endDate") or "—"
+                                    size_str = f"{size:,.3f}"
+                                    avg_entry_str = f"{avg_entry:.4f}"
+                                    mark_str = f"{mark_price:.4f}"
+                                    usd_str = format_currency(usd_val)
+                                    pnl_str = format_currency(pnl_val)
+                                    pm_rows.append(
+                                        [
+                                            prediction,
+                                            side,
+                                            size_str,
+                                            avg_entry_str,
+                                            mark_str,
+                                            usd_str,
+                                            pnl_str,
+                                            deadline,
+                                        ]
+                                    )
+                                print(
+                                    _tab(
+                                        pm_rows,
+                                        headers=[
+                                            "Prediction",
+                                            "Side",
+                                            "Size",
+                                            "Avg Entry",
+                                            "Price",
+                                            "USD Value",
+                                            "PnL",
+                                            "Deadline",
+                                        ],
+                                        tablefmt="simple",
+                                    )
+                                )
+                            else:
+                                print(
+                                    f"{theme.SUBTLE}No active Polymarket positions available{theme.RESET}"
+                                )
 
                     # When showing single protocol, accumulate dust/total later outside loop
 
@@ -3059,63 +3173,79 @@ def display_perp_dex_positions(portfolio_metrics: Dict[str, Any]):
 
             print(f"\n{theme.SUBTLE}Open Positions{theme.RESET}")
             headers = [
-                f"{theme.PRIMARY}Asset{theme.RESET}",
-                f"{theme.PRIMARY}Position{theme.RESET}",
+                f"{theme.PRIMARY}Market{theme.RESET}",
+                f"{theme.PRIMARY}Size{theme.RESET}",
+                f"{theme.PRIMARY}Position Value{theme.RESET}",
                 f"{theme.PRIMARY}Entry Price{theme.RESET}",
+                f"{theme.PRIMARY}Mark Price{theme.RESET}",
                 f"{theme.PRIMARY}Liq. Price{theme.RESET}",
-                f"{theme.PRIMARY}Leverage{theme.RESET}",
                 f"{theme.PRIMARY}Unrealized PNL{theme.RESET}",
+                f"{theme.PRIMARY}Margin{theme.RESET}",
+                f"{theme.PRIMARY}Funding{theme.RESET}",
             ]
-
-            sortable_rows: List[Tuple[float, List[str]]] = []
+            table_rows: List[List[str]] = []
 
             for position in positions:
                 if not isinstance(position, dict):
                     continue
 
                 size = safe_float_convert(position.get("size", position.get("position", 0.0)))
-                if size > 0:
-                    direction = f"{theme.SUCCESS}📈 Long{theme.RESET}"
-                elif size < 0:
-                    direction = f"{theme.ERROR}📉 Short{theme.RESET}"
-                else:
-                    direction = f"{theme.SUBTLE}➖ Flat{theme.RESET}"
+                symbol = (position.get("asset") or position.get("symbol") or "?").upper()
+                leverage_val = safe_float_convert(position.get("leverage", 0.0))
+                market_display = (
+                    f"{theme.ACCENT}{symbol} {leverage_val:.2f}x{theme.RESET}"
+                    if leverage_val > 0
+                    else f"{theme.ACCENT}{symbol}{theme.RESET}"
+                )
 
-                pnl = safe_float_convert(position.get("unrealized_pnl", 0))
+                position_value = safe_float_convert(position.get("position_value", 0.0))
+                entry_price = safe_float_convert(position.get("entry_price", 0.0))
+                mark_price = safe_float_convert(position.get("mark_price", 0.0))
+                liq_price = safe_float_convert(position.get("liquidation_price", 0.0))
+                pnl = safe_float_convert(position.get("unrealized_pnl", 0.0))
+                margin_val = safe_float_convert(position.get("margin", 0.0))
+                funding_val = safe_float_convert(position.get("funding", 0.0))
+
                 if pnl > 0:
-                    pnl_formatted = f"{theme.SUCCESS}💰 +{format_currency(pnl)}{theme.RESET}"
+                    pnl_display = f"{theme.SUCCESS}+{format_currency(pnl)}{theme.RESET}"
                 elif pnl < 0:
-                    pnl_formatted = f"{theme.ERROR}💸 {format_currency(pnl)}{theme.RESET}"
+                    pnl_display = f"{theme.ERROR}{format_currency(pnl)}{theme.RESET}"
                 else:
-                    pnl_formatted = f"{theme.SUBTLE}➖ {format_currency(pnl)}{theme.RESET}"
+                    pnl_display = f"{theme.SUBTLE}{format_currency(0)}{theme.RESET}"
 
-                liq_price = safe_float_convert(position.get("liquidation_price", 0))
                 liq_display = (
                     f"{theme.WARNING}⚠️ {format_currency(liq_price)}{theme.RESET}"
                     if liq_price
                     else f"{theme.SUBTLE}N/A{theme.RESET}"
                 )
 
-                entry_price = safe_float_convert(position.get("entry_price", 0))
-                leverage = safe_float_convert(position.get("leverage", 0))
+                if size > 0:
+                    direction_display = f"{theme.SUCCESS}📈 Long{theme.RESET}"
+                elif size < 0:
+                    direction_display = f"{theme.ERROR}📉 Short{theme.RESET}"
+                else:
+                    direction_display = f"{theme.SUBTLE}➖ Flat{theme.RESET}"
+                size_display = f"{abs(size):,.4f} ({direction_display})"
 
-                row = [
-                    f"{theme.ACCENT}{position.get('asset', '?')}{theme.RESET}",
-                    f"{abs(size):.4f} ({direction})",
-                    f"{theme.PRIMARY}{format_currency(entry_price)}{theme.RESET}",
-                    liq_display,
-                    (
-                        f"{theme.SUBTLE}{leverage:.2f}x{theme.RESET}"
-                        if leverage
-                        else f"{theme.SUBTLE}—{theme.RESET}"
-                    ),
-                    pnl_formatted,
-                ]
-                sortable_rows.append((pnl, row))
+                table_rows.append(
+                    [
+                        market_display,
+                        size_display,
+                        format_currency(position_value),
+                        format_currency(entry_price)
+                        if entry_price
+                        else f"{theme.SUBTLE}—{theme.RESET}",
+                        format_currency(mark_price)
+                        if mark_price
+                        else f"{theme.SUBTLE}—{theme.RESET}",
+                        liq_display,
+                        pnl_display,
+                        format_currency(margin_val) if margin_val else f"{theme.SUBTLE}—{theme.RESET}",
+                        format_currency(funding_val) if funding_val else f"{theme.SUBTLE}—{theme.RESET}",
+                    ]
+                )
 
-            if sortable_rows:
-                sortable_rows.sort(key=lambda item: item[0], reverse=True)
-                table_rows = [row for _, row in sortable_rows]
+            if table_rows:
                 print(
                     tabulate(
                         table_rows,
@@ -3155,53 +3285,78 @@ def display_perp_dex_positions(portfolio_metrics: Dict[str, Any]):
 
             print(f"\n{theme.SUBTLE}Open Positions{theme.RESET}")
             headers = [
-                f"{theme.PRIMARY}Asset{theme.RESET}",
-                f"{theme.PRIMARY}Position{theme.RESET}",
-                f"{theme.PRIMARY}Entry Price{theme.RESET}",
+                f"{theme.PRIMARY}Market{theme.RESET}",
+                f"{theme.PRIMARY}Size{theme.RESET}",
                 f"{theme.PRIMARY}Position Value{theme.RESET}",
+                f"{theme.PRIMARY}Entry Price{theme.RESET}",
+                f"{theme.PRIMARY}Mark Price{theme.RESET}",
                 f"{theme.PRIMARY}Liq. Price{theme.RESET}",
                 f"{theme.PRIMARY}Unrealized PNL{theme.RESET}",
+                f"{theme.PRIMARY}Margin{theme.RESET}",
             ]
-            table_data = []
+            table_rows: List[List[str]] = []
 
             for pos in positions:
                 if not isinstance(pos, dict):
                     continue
-                symbol = pos.get("symbol", "N/A")
+
+                symbol = (pos.get("symbol", "N/A") or "N/A").upper()
+                leverage = safe_float_convert(pos.get("leverage", 0.0))
+                market_display = (
+                    f"{theme.ACCENT}{symbol} {leverage:.2f}x{theme.RESET}"
+                    if leverage > 0
+                    else f"{theme.ACCENT}{symbol}{theme.RESET}"
+                )
+
                 position_size = safe_float_convert(pos.get("position", 0.0))
                 position_value = safe_float_convert(pos.get("position_value", 0.0))
                 entry_price = safe_float_convert(pos.get("avg_entry_price", 0.0))
+                mark_price = safe_float_convert(pos.get("mark_price", 0.0))
                 liq_price = safe_float_convert(pos.get("liquidation_price", 0.0))
                 pnl = safe_float_convert(pos.get("unrealized_pnl", 0.0))
-
-                if position_size > 0:
-                    direction = f"{theme.SUCCESS}📈 Long{theme.RESET}"
-                elif position_size < 0:
-                    direction = f"{theme.ERROR}📉 Short{theme.RESET}"
-                else:
-                    direction = f"{theme.SUBTLE}➖ Flat{theme.RESET}"
+                margin_val = safe_float_convert(pos.get("margin", 0.0))
 
                 if pnl > 0:
-                    pnl_fmt = f"{theme.SUCCESS}+{format_currency(pnl)}{theme.RESET}"
+                    pnl_display = f"{theme.SUCCESS}+{format_currency(pnl)}{theme.RESET}"
                 elif pnl < 0:
-                    pnl_fmt = f"{theme.ERROR}{format_currency(pnl)}{theme.RESET}"
+                    pnl_display = f"{theme.ERROR}{format_currency(pnl)}{theme.RESET}"
                 else:
-                    pnl_fmt = f"{theme.SUBTLE}{format_currency(pnl)}{theme.RESET}"
+                    pnl_display = f"{theme.SUBTLE}{format_currency(0)}{theme.RESET}"
 
-                table_data.append(
+                liq_display = (
+                    f"{theme.WARNING}⚠️ {format_currency(liq_price)}{theme.RESET}"
+                    if liq_price
+                    else f"{theme.SUBTLE}N/A{theme.RESET}"
+                )
+
+                if position_size > 0:
+                    direction_display = f"{theme.SUCCESS}📈 Long{theme.RESET}"
+                elif position_size < 0:
+                    direction_display = f"{theme.ERROR}📉 Short{theme.RESET}"
+                else:
+                    direction_display = f"{theme.SUBTLE}➖ Flat{theme.RESET}"
+                size_display = f"{abs(position_size):,.4f} ({direction_display})"
+
+                table_rows.append(
                     [
-                        f"{theme.ACCENT}{symbol}{theme.RESET}",
-                        f"{abs(position_size):.4f} ({direction})",
-                        f"{entry_price:,.2f}",
+                        market_display,
+                        size_display,
                         format_currency(position_value),
-                        f"{liq_price:,.2f}" if liq_price else "—",
-                        pnl_fmt,
+                        format_currency(entry_price)
+                        if entry_price
+                        else f"{theme.SUBTLE}—{theme.RESET}",
+                        format_currency(mark_price)
+                        if mark_price
+                        else f"{theme.SUBTLE}—{theme.RESET}",
+                        liq_display,
+                        pnl_display,
+                        format_currency(margin_val) if margin_val else f"{theme.SUBTLE}—{theme.RESET}",
                     ]
                 )
 
             print(
                 tabulate(
-                    table_data,
+                    table_rows,
                     headers=headers,
                     tablefmt="rounded_grid",
                     numalign="right",
@@ -3254,7 +3409,11 @@ def display_perp_dex_positions(portfolio_metrics: Dict[str, Any]):
         headers = ["Platform", "Total Value", "Accounts", "Open Positions"]
         print(
             tabulate(
-                table_data, headers=headers, tablefmt="grid", stralign="left", numalign="right"
+                table_data,
+                headers=headers,
+                tablefmt="rounded_grid",
+                stralign="left",
+                numalign="right",
             )
         )
         print(
@@ -3332,9 +3491,8 @@ def display_polymarket_positions(portfolio_metrics: Dict[str, Any]):
     print_header("Polymarket Positions")
     print(f"\n{theme.PRIMARY}🎯 POLYMARKET SUMMARY{theme.RESET}")
     print(f"{theme.SUBTLE}{'─' * 26}{theme.RESET}")
-    print(f"Tracked Owners:    {theme.ACCENT}{len(polymarket_accounts)}{theme.RESET}")
-    print(f"Active Portfolios: {theme.ACCENT}{len(valid_accounts)}{theme.RESET}")
-    print(f"Total Value:       {theme.SUCCESS}{format_currency(total_value)}{theme.RESET}")
+    print(f"Tracked Wallets: {theme.ACCENT}{len(polymarket_accounts)}{theme.RESET}")
+    print(f"Total Value:     {theme.SUCCESS}{format_currency(total_value)}{theme.RESET}")
 
     missing_proxy_count = sum(
         1 for acct in polymarket_accounts if acct.get("error") == "proxy_not_configured"
@@ -3352,7 +3510,7 @@ def display_polymarket_positions(portfolio_metrics: Dict[str, Any]):
         error_state = account.get("error")
 
         print(
-            f"\n{theme.PRIMARY}📊 OWNER {idx}: {theme.ACCENT}{owner_short}{theme.RESET} "
+            f"\n{theme.PRIMARY}📊 WALLET {idx}: {theme.ACCENT}{owner_short}{theme.RESET} "
             f"{theme.SUBTLE}(Proxy {proxy_short}){theme.RESET}"
         )
         print(f"{theme.SUBTLE}{'─' * (20 + len(owner_short))}{theme.RESET}")
@@ -3389,18 +3547,18 @@ def display_polymarket_positions(portfolio_metrics: Dict[str, Any]):
 
         positions = account.get("positions", []) or []
         if not positions:
-            print(f"\n{theme.SUBTLE}No active Polymarket positions{theme.RESET}")
+            print(f"\n{theme.SUBTLE}No Polymarket positions{theme.RESET}")
             continue
 
         headers = [
-            f"{theme.PRIMARY}Market{theme.RESET}",
-            f"{theme.PRIMARY}Outcome{theme.RESET}",
+            f"{theme.PRIMARY}Prediction{theme.RESET}",
+            f"{theme.PRIMARY}Side{theme.RESET}",
             f"{theme.PRIMARY}Size{theme.RESET}",
-            f"{theme.PRIMARY}Avg Price{theme.RESET}",
-            f"{theme.PRIMARY}Mark{theme.RESET}",
-            f"{theme.PRIMARY}Current Value{theme.RESET}",
-            f"{theme.PRIMARY}Cash PnL{theme.RESET}",
-            f"{theme.PRIMARY}Status{theme.RESET}",
+            f"{theme.PRIMARY}Avg Entry{theme.RESET}",
+            f"{theme.PRIMARY}Price{theme.RESET}",
+            f"{theme.PRIMARY}USD Value{theme.RESET}",
+            f"{theme.PRIMARY}PnL{theme.RESET}",
+            f"{theme.PRIMARY}Deadline{theme.RESET}",
         ]
         table_rows: List[List[str]] = []
 
@@ -3412,19 +3570,9 @@ def display_polymarket_positions(portfolio_metrics: Dict[str, Any]):
             current_price = safe_float_convert(position.get("current_price", 0.0))
             current_value = safe_float_convert(position.get("current_value", 0.0))
             cash_pnl = safe_float_convert(position.get("cash_pnl", 0.0))
-            redeemable = bool(position.get("redeemable"))
             end_date = position.get("end_date")
 
-            status_parts = []
-            if redeemable:
-                status_parts.append("Redeemable")
-            elif current_value > 0:
-                status_parts.append("Active")
-            else:
-                status_parts.append("Settled")
-            if end_date:
-                status_parts.append(end_date)
-            status = " • ".join(status_parts)
+            deadline = end_date or "—"
 
             table_rows.append(
                 [
@@ -3435,19 +3583,20 @@ def display_polymarket_positions(portfolio_metrics: Dict[str, Any]):
                     f"{current_price:.4f}",
                     format_currency(current_value),
                     format_currency(cash_pnl),
-                    status,
+                    deadline,
                 ]
             )
 
-        print(
-            tabulate(
-                table_rows,
-                headers=headers,
-                tablefmt="rounded_grid",
-                numalign="right",
-                stralign="left",
+        if table_rows:
+            print(
+                tabulate(
+                    table_rows,
+                    headers=headers,
+                    tablefmt="rounded_grid",
+                    numalign="right",
+                    stralign="left",
+                )
             )
-        )
 
     print()
 
@@ -3493,71 +3642,86 @@ def display_hyperliquid_positions(portfolio_metrics: Dict[str, Any]):
         print(f"\n{theme.SUBTLE}Open Positions{theme.RESET}")
 
         headers = [
-            f"{theme.PRIMARY}Asset{theme.RESET}",
-            f"{theme.PRIMARY}Position{theme.RESET}",
+            f"{theme.PRIMARY}Market{theme.RESET}",
+            f"{theme.PRIMARY}Size{theme.RESET}",
+            f"{theme.PRIMARY}Position Value{theme.RESET}",
             f"{theme.PRIMARY}Entry Price{theme.RESET}",
+            f"{theme.PRIMARY}Mark Price{theme.RESET}",
             f"{theme.PRIMARY}Liq. Price{theme.RESET}",
-            f"{theme.PRIMARY}Leverage{theme.RESET}",
             f"{theme.PRIMARY}Unrealized PNL{theme.RESET}",
+            f"{theme.PRIMARY}Margin{theme.RESET}",
+            f"{theme.PRIMARY}Funding{theme.RESET}",
         ]
-        table_data = []
+        table_rows = []
 
         for p in positions:
-            size = p.get("size", 0.0)
+            size = safe_float_convert(p.get("size", p.get("position", 0.0)))
+            symbol = (p.get("asset") or p.get("symbol") or "?").upper()
+            leverage = safe_float_convert(p.get("leverage", 0.0))
+            market_display = (
+                f"{theme.ACCENT}{symbol} {leverage:.2f}x{theme.RESET}"
+                if leverage > 0
+                else f"{theme.ACCENT}{symbol}{theme.RESET}"
+            )
 
-            # Enhanced position direction display
-            if size > 0:
-                direction = f"{theme.SUCCESS}📈 Long{theme.RESET}"
-                position_display = f"{abs(size):.4f} ({direction})"
-            elif size < 0:
-                direction = f"{theme.ERROR}📉 Short{theme.RESET}"
-                position_display = f"{abs(size):.4f} ({direction})"
+            position_value = safe_float_convert(p.get("position_value", 0.0))
+            entry_price = safe_float_convert(p.get("entry_price", 0.0))
+            mark_price = safe_float_convert(p.get("mark_price", 0.0))
+            liq_price = safe_float_convert(p.get("liquidation_price", 0.0))
+            pnl = safe_float_convert(p.get("unrealized_pnl", 0.0))
+            margin_val = safe_float_convert(p.get("margin", 0.0))
+            funding_val = safe_float_convert(p.get("funding", 0.0))
+
+            if pnl > 0:
+                pnl_display = f"{theme.SUCCESS}+{format_currency(pnl)}{theme.RESET}"
+            elif pnl < 0:
+                pnl_display = f"{theme.ERROR}{format_currency(pnl)}{theme.RESET}"
             else:
-                direction = f"{theme.SUBTLE}➖ Flat{theme.RESET}"
-                position_display = f"{abs(size):.4f} ({direction})"
+                pnl_display = f"{theme.SUBTLE}{format_currency(0)}{theme.RESET}"
 
-            # Enhanced PNL formatting
-            pnl = p.get("unrealized_pnl", 0)
-            if pnl is not None:
-                if pnl > 0:
-                    pnl_formatted = f"{theme.SUCCESS}💰 +{format_currency(pnl)}{theme.RESET}"
-                elif pnl < 0:
-                    pnl_formatted = f"{theme.ERROR}💸 {format_currency(pnl)}{theme.RESET}"
-                else:
-                    pnl_formatted = f"{theme.SUBTLE}➖ {format_currency(pnl)}{theme.RESET}"
-            else:
-                pnl_formatted = f"{theme.SUBTLE}N/A{theme.RESET}"
-
-            # Enhanced liquidation price display
-            liq_price = p.get("liquidation_price")
             liq_display = (
                 f"{theme.WARNING}⚠️ {format_currency(liq_price)}{theme.RESET}"
                 if liq_price
                 else f"{theme.SUBTLE}N/A{theme.RESET}"
             )
 
-            table_data.append(
+            if size > 0:
+                direction_display = f"{theme.SUCCESS}📈 Long{theme.RESET}"
+            elif size < 0:
+                direction_display = f"{theme.ERROR}📉 Short{theme.RESET}"
+            else:
+                direction_display = f"{theme.SUBTLE}➖ Flat{theme.RESET}"
+            size_display = f"{abs(size):,.4f} ({direction_display})"
+
+            table_rows.append(
                 [
-                    f"{theme.ACCENT}{p.get('asset', '?')}{theme.RESET}",
-                    position_display,
-                    f"{theme.PRIMARY}{format_currency(p.get('entry_price'))}{theme.RESET}",
+                    market_display,
+                    size_display,
+                    format_currency(position_value),
+                    format_currency(entry_price)
+                    if entry_price
+                    else f"{theme.SUBTLE}—{theme.RESET}",
+                    format_currency(mark_price)
+                    if mark_price
+                    else f"{theme.SUBTLE}—{theme.RESET}",
                     liq_display,
-                    f"{theme.SUBTLE}{p.get('leverage', 0.0):.2f}x{theme.RESET}",
-                    pnl_formatted,
+                    pnl_display,
+                    format_currency(margin_val) if margin_val else f"{theme.SUBTLE}—{theme.RESET}",
                 ]
             )
 
-        # Sort by unrealized PNL descending (most profitable first)
-        table_data.sort(key=lambda row: p.get("unrealized_pnl", 0), reverse=True)
-        print(
-            tabulate(
-                table_data,
-                headers=headers,
-                tablefmt="rounded_grid",
-                numalign="right",
-                stralign="left",
+        if table_rows:
+            print(
+                tabulate(
+                    table_rows,
+                    headers=headers,
+                    tablefmt="grid",
+                    numalign="right",
+                    stralign="left",
+                )
             )
-        )
+        else:
+            print(f"{theme.SUBTLE}No open positions{theme.RESET}")
 
     print()  # Final spacing
 
@@ -3600,56 +3764,77 @@ def display_lighter_positions(portfolio_metrics: Dict[str, Any]):
 
         print(f"\n{theme.SUBTLE}Open Positions{theme.RESET}")
         headers = [
-            f"{theme.PRIMARY}Asset{theme.RESET}",
-            f"{theme.PRIMARY}Position{theme.RESET}",
-            f"{theme.PRIMARY}Entry Price{theme.RESET}",
+            f"{theme.PRIMARY}Market{theme.RESET}",
+            f"{theme.PRIMARY}Size{theme.RESET}",
             f"{theme.PRIMARY}Position Value{theme.RESET}",
+            f"{theme.PRIMARY}Entry Price{theme.RESET}",
+            f"{theme.PRIMARY}Mark Price{theme.RESET}",
             f"{theme.PRIMARY}Liq. Price{theme.RESET}",
             f"{theme.PRIMARY}Unrealized PNL{theme.RESET}",
+            f"{theme.PRIMARY}Margin{theme.RESET}",
         ]
-        table_data = []
+        table_rows = []
 
         for pos in positions:
-            symbol = pos.get("symbol", "N/A")
+            symbol = (pos.get("symbol", "N/A") or "N/A").upper()
+            leverage = safe_float_convert(pos.get("leverage", 0.0))
+            market_display = (
+                f"{theme.ACCENT}{symbol} {leverage:.2f}x{theme.RESET}"
+                if leverage > 0
+                else f"{theme.ACCENT}{symbol}{theme.RESET}"
+            )
+
             position_size = safe_float_convert(pos.get("position", 0.0))
             position_value = safe_float_convert(pos.get("position_value", 0.0))
             entry_price = safe_float_convert(pos.get("avg_entry_price", 0.0))
+            mark_price = safe_float_convert(pos.get("mark_price", 0.0))
             liq_price = safe_float_convert(pos.get("liquidation_price", 0.0))
             pnl = safe_float_convert(pos.get("unrealized_pnl", 0.0))
+            margin_val = safe_float_convert(pos.get("margin", 0.0))
 
-            if position_size > 0:
-                direction = f"{theme.SUCCESS}📈 Long{theme.RESET}"
-            elif position_size < 0:
-                direction = f"{theme.ERROR}📉 Short{theme.RESET}"
+            if pnl > 0:
+                pnl_display = f"{theme.SUCCESS}+{format_currency(pnl)}{theme.RESET}"
+            elif pnl < 0:
+                pnl_display = f"{theme.ERROR}{format_currency(pnl)}{theme.RESET}"
             else:
-                direction = f"{theme.SUBTLE}➖ Flat{theme.RESET}"
+                pnl_display = f"{theme.SUBTLE}{format_currency(0)}{theme.RESET}"
 
-            pnl_fmt = (
-                f"{theme.SUCCESS}+{format_currency(pnl)}{theme.RESET}"
-                if pnl > 0
-                else (
-                    f"{theme.ERROR}{format_currency(pnl)}{theme.RESET}"
-                    if pnl < 0
-                    else f"{theme.SUBTLE}{format_currency(pnl)}{theme.RESET}"
-                )
+            liq_display = (
+                f"{theme.WARNING}⚠️ {format_currency(liq_price)}{theme.RESET}"
+                if liq_price
+                else f"{theme.SUBTLE}N/A{theme.RESET}"
             )
 
-            table_data.append(
+            if position_size > 0:
+                direction_display = f"{theme.SUCCESS}📈 Long{theme.RESET}"
+            elif position_size < 0:
+                direction_display = f"{theme.ERROR}📉 Short{theme.RESET}"
+            else:
+                direction_display = f"{theme.SUBTLE}➖ Flat{theme.RESET}"
+            size_display = f"{abs(position_size):,.4f} ({direction_display})"
+
+            table_rows.append(
                 [
-                    f"{theme.ACCENT}{symbol}{theme.RESET}",
-                    f"{abs(position_size):.4f} ({direction})",
-                    f"{entry_price:,.2f}",
+                    market_display,
+                    size_display,
                     format_currency(position_value),
-                    f"{liq_price:,.2f}",
-                    pnl_fmt,
+                    format_currency(entry_price)
+                    if entry_price
+                    else f"{theme.SUBTLE}—{theme.RESET}",
+                    format_currency(mark_price)
+                    if mark_price
+                    else f"{theme.SUBTLE}—{theme.RESET}",
+                    liq_display,
+                    pnl_display,
+                    format_currency(margin_val) if margin_val else f"{theme.SUBTLE}—{theme.RESET}",
                 ]
             )
 
         print(
             tabulate(
-                table_data,
+                table_rows,
                 headers=headers,
-                tablefmt="rounded_grid",
+                tablefmt="grid",
                 numalign="right",
                 stralign="left",
             )
@@ -3705,7 +3890,14 @@ def display_cex_breakdown(metrics: Dict[str, Any]):
                 exchange_data.append([name, "No Balance", "0.0%"])
 
         headers = ["Exchange", "Balance", "Share"]
-        print(f"\n{tabulate(exchange_data, headers=headers, tablefmt='grid')}")
+        print(
+            "\n"
+            + tabulate(
+                exchange_data,
+                headers=headers,
+                tablefmt="rounded_grid",
+            )
+        )
 
     render_summary()
 

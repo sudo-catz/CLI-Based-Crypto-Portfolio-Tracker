@@ -11,7 +11,7 @@ This module integrates with the existing portfolio analysis system
 and saves exposure data alongside portfolio metrics.
 """
 
-from typing import Dict, List, Any, Optional, Set, Tuple
+from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 from dataclasses import dataclass, field
 import json
@@ -672,7 +672,9 @@ class ExposureTracker:
                 # Try to use Portfolio Summary Statistics for proper asset breakdown
                 if portfolio_summary_stats and not evm_processed:
                     success = self._process_evm_with_summary_stats(
-                        consolidated, portfolio_summary_stats, crypto_prices
+                        consolidated,
+                        portfolio_summary_stats,
+                        crypto_prices,
                     )
                     if success:
                         evm_processed = True
@@ -747,16 +749,20 @@ class ExposureTracker:
             platform = wallet_info.get("platform")
             if platform == "hyperliquid":
                 # Hyperliquid platform data
-                account_value = safe_float_convert(wallet_info.get("total_balance", 0))
+                account_total = safe_float_convert(wallet_info.get("total_balance", 0))
+                margin_used = safe_float_convert(
+                    wallet_info.get("margin_total_used", account_total)
+                )
                 positions = (
                     wallet_info.get("positions", wallet_info.get("open_positions", [])) or []
                 )
                 self._process_margin_positions(
                     consolidated,
-                    account_value,
+                    margin_used,
                     positions,
                     crypto_prices,
                     platform_name="Hyperliquid",
+                    collateral_value_raw=account_total,
                 )
 
             elif platform == "lighter":
@@ -770,59 +776,27 @@ class ExposureTracker:
                     platform_name="Lighter",
                     symbol_key="symbol",
                     value_key="position_value",
+                    collateral_value_raw=account_value,
                 )
-            elif platform == "polymarket":
-                account_value = safe_float_convert(wallet_info.get("total_balance", 0))
-                usdc_balance = safe_float_convert(wallet_info.get("usdc_balance", 0))
-                positions_value = safe_float_convert(
-                    wallet_info.get("positions_value", account_value - usdc_balance)
-                )
-                positions_value = max(positions_value, 0.0)
-
-                if usdc_balance > 0.01:
-                    self._add_to_consolidated(
-                        consolidated,
-                        "USDC",
-                        usdc_balance,
-                        usdc_balance,
-                        "Polymarket",
-                        crypto_prices,
-                        metadata={
-                            "source_platform": "Polymarket",
-                            "force_is_stable": True,
-                        },
-                    )
-
-                residual_value = max(account_value - usdc_balance, 0.0)
-                # Prefer explicit positions_value if provided, otherwise use residual
-                market_value = positions_value if positions_value > 0.01 else residual_value
-                if market_value > 0.01:
-                    self._add_to_consolidated(
-                        consolidated,
-                        "POLYMARKET_POSITIONS",
-                        0,
-                        market_value,
-                        "Polymarket",
-                        crypto_prices,
-                        metadata={
-                            "source_platform": "Polymarket",
-                            "category": "prediction_market",
-                            "is_prediction_market": True,
-                        },
-                    )
             else:
                 # Check for hyperliquid data nested within wallet info
                 hyperliquid_data = wallet_info.get("hyperliquid", {})
                 if isinstance(hyperliquid_data, dict):
                     # Account value
-                    account_value = safe_float_convert(hyperliquid_data.get("account_value", 0))
+                    collateral_total = safe_float_convert(
+                        hyperliquid_data.get("account_value", 0)
+                    )
+                    margin_used = safe_float_convert(
+                        hyperliquid_data.get("margin_total_used", collateral_total)
+                    )
                     positions = hyperliquid_data.get("positions", [])
                     self._process_margin_positions(
                         consolidated,
-                        account_value,
+                        margin_used,
                         positions,
                         crypto_prices,
                         platform_name="Hyperliquid",
+                        collateral_value_raw=collateral_total,
                     )
 
     def _process_margin_positions(
@@ -834,18 +808,20 @@ class ExposureTracker:
         platform_name: str,
         symbol_key: str = "asset",
         value_key: str = "position_value",
+        collateral_value_raw: Any = None,
     ) -> None:
         """Allocate derivative exposure using margin instead of notional."""
         account_value = safe_float_convert(account_value_raw, 0.0)
+        collateral_total = safe_float_convert(collateral_value_raw, account_value)
         valid_positions: List[Dict[str, Any]] = [pos for pos in positions if isinstance(pos, dict)]
 
         if not valid_positions:
-            if account_value > 0.01:
+            if collateral_total > 0.01:
                 self._add_to_consolidated(
                     consolidated,
                     self._format_margin_symbol(platform_name, reserve=True),
                     0,
-                    account_value,
+                    collateral_total,
                     platform_name,
                     crypto_prices,
                     metadata={
@@ -905,6 +881,10 @@ class ExposureTracker:
                 or position.get("initial_margin"),
                 0.0,
             )
+            if explicit_margin <= 0:
+                fraction = safe_float_convert(position.get("initial_margin_fraction", 0), 0.0)
+                if fraction > 0:
+                    explicit_margin = notional * (fraction / 100.0)
 
             entry_price = safe_float_convert(
                 position.get("entry_price")
@@ -998,7 +978,9 @@ class ExposureTracker:
             max_symbol_net_ratio <= 0.10
         )  # Treat as stable if each asset nets out within 10%
 
-        allocation_base = account_value if account_value > 0 else explicit_margin_total
+        allocation_base = (
+            account_value if account_value > 0 else explicit_margin_total
+        )
         margin_total = 0.0
 
         margin_symbol = self._format_margin_symbol(platform_name, reserve=False)
@@ -1060,8 +1042,8 @@ class ExposureTracker:
                 unrealized_pnl_delta=position_pnl,
             )
 
-        if account_value > 0:
-            residual_collateral = max(account_value - margin_total, 0.0)
+        if collateral_total > 0:
+            residual_collateral = max(collateral_total - margin_total, 0.0)
             if residual_collateral > 0.01:
                 reserve_symbol = self._format_margin_symbol(platform_name, reserve=True)
                 self._add_to_consolidated(
@@ -1092,6 +1074,10 @@ class ExposureTracker:
     ):
         """Helper to add asset data to consolidated tracking."""
         # Normalize asset symbol
+        if isinstance(asset_symbol, str):
+            symbol_lower = asset_symbol.lower().replace(" ", "")
+            if "polymarketposition" in symbol_lower:
+                asset_symbol = "POLYMARKET_POSITIONS"
         base_symbol = self.asset_aliases.get(asset_symbol, asset_symbol)
         normalized_symbol = self._normalize_symbol(base_symbol)
 
@@ -1313,6 +1299,11 @@ class ExposureTracker:
                 "platform_count": len(asset_data.platforms),
                 "metadata": metadata_copy,
             }
+            if symbol == "POLYMARKET_POSITIONS":
+                asset_info["total_quantity"] = None
+                asset_info["current_price"] = None
+                asset_info["market_price"] = None
+                asset_info["implied_price"] = None
             total_unrealized_pnl = safe_float_convert(metadata_copy.get("total_unrealized_pnl", 0))
             if total_unrealized_pnl != 0:
                 asset_info["total_unrealized_pnl"] = total_unrealized_pnl

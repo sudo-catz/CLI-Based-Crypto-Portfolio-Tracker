@@ -65,7 +65,23 @@ class ETHExposureDataFetcher:
                 for token in wallet_data.tokens
             ]
 
-            protocols = wallet_data.protocols
+            protocols = []
+            for proto in wallet_data.protocols:
+                proto_copy = json.loads(json.dumps(proto)) if isinstance(proto, dict) else proto
+                if (
+                    isinstance(proto_copy, dict)
+                    and str(proto_copy.get("name", "")).lower() == "polymarket"
+                ):
+                    for position in proto_copy.get("positions", []) or []:
+                        if (
+                            isinstance(position, dict)
+                            and str(position.get("header_type", "")).lower() == "name"
+                        ):
+                            outcome_value = position.get("asset") or position.get("label")
+                            if outcome_value:
+                                position["side"] = outcome_value
+                            position["asset"] = "Polymarket Position"
+                protocols.append(proto_copy)
 
             summary_stats = {
                 "portfolio_value_usd": wallet_data.total_usd_value,

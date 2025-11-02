@@ -878,19 +878,20 @@ class EnhancedDeBankScraper:
             # Extract position type from panels
             position_type = "Unknown"
             panel_elements = await element.query_selector_all(".BookMark_bookmark__UG5a4")
+            panel_type_list: List[str] = []
             if panel_elements:
-                position_types = []
-                for panel in panel_elements:
-                    panel_text = await panel.inner_text()
-                    position_types.append(panel_text.strip())
-                position_type = ", ".join(position_types)
+                for bookmark in panel_elements:
+                    panel_text = await bookmark.inner_text()
+                    panel_type_list.append(panel_text.strip())
+                if panel_type_list:
+                    position_type = ", ".join(panel_type_list)
 
             # Attempt to extract detailed positions inside the panel container
             positions_list, headers = [], []
             try:
                 panel_sel = self.selectors.get("panel_container", '[class*="Panel_container"]')
-                panel_el = await element.query_selector(panel_sel)
-                if not panel_el:
+                panel_elements_found = await element.query_selector_all(panel_sel)
+                if not panel_elements_found:
                     # Expand the card to reveal panel
                     try:
                         await element.scroll_into_view_if_needed()
@@ -899,15 +900,37 @@ class EnhancedDeBankScraper:
                             await element.wait_for_selector(panel_sel, timeout=2000)
                         except Exception:
                             await asyncio.sleep(0.6)
-                        panel_el = await element.query_selector(panel_sel)
+                        panel_elements_found = await element.query_selector_all(panel_sel)
                     except Exception:
-                        # Final retry
                         await asyncio.sleep(0.8)
-                        panel_el = await element.query_selector(panel_sel)
-                if panel_el:
-                    positions_list, headers = await self._parse_positions_in_panel(
-                        panel_el, position_type
-                    )
+                        panel_elements_found = await element.query_selector_all(panel_sel)
+
+                aggregated_positions: List[Dict[str, Any]] = []
+                aggregated_headers: List[str] = []
+                if panel_elements_found:
+                    for idx, panel_node in enumerate(panel_elements_found):
+                        current_type = (
+                            panel_type_list[idx]
+                            if idx < len(panel_type_list)
+                            else panel_type_list[-1]
+                            if panel_type_list
+                            else position_type
+                        )
+                        try:
+                            parsed_positions, header_entries = await self._parse_positions_in_panel(
+                                panel_node, current_type
+                            )
+                            if parsed_positions:
+                                aggregated_positions.extend(parsed_positions)
+                            if header_entries:
+                                for header_entry in header_entries:
+                                    if header_entry not in aggregated_headers:
+                                        aggregated_headers.append(header_entry)
+                        except Exception:
+                            continue
+
+                positions_list = aggregated_positions
+                headers = aggregated_headers
             except Exception:
                 positions_list, headers = [], []
 

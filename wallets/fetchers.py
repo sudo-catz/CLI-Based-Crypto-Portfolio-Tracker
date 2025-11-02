@@ -293,6 +293,9 @@ class WalletPlatformFetcher:
                         return None
 
                 balance_usd = safe_float_convert(margin_summary.get("accountValue", 0))
+                margin_used_total = safe_float_convert(
+                    margin_summary.get("totalMarginUsed", 0)
+                )
                 position_info = []
                 if isinstance(asset_positions, list):
                     for position in asset_positions:
@@ -316,6 +319,29 @@ class WalletPlatformFetcher:
                             else:
                                 asset_symbol = "UNKNOWN"
 
+                            position_value = safe_float_convert(
+                                pos_data.get("positionValue", 0)
+                            )
+                            mark_price = (
+                                position_value / abs(size_float)
+                                if abs(size_float) > 1e-9
+                                else safe_float_convert(pos_data.get("markPx", 0))
+                            )
+                            leverage_info = pos_data.get("leverage")
+                            leverage_value = None
+                            if isinstance(leverage_info, dict):
+                                leverage_value = safe_float_convert(
+                                    leverage_info.get("value", 0)
+                                )
+
+                            margin_used = safe_float_convert(pos_data.get("marginUsed", 0))
+                            funding_val = 0.0
+                            cum_funding = pos_data.get("cumFunding")
+                            if isinstance(cum_funding, dict):
+                                funding_val = -safe_float_convert(
+                                    cum_funding.get("sinceOpen", cum_funding.get("allTime", 0.0))
+                                )
+
                             position_info.append(
                                 {
                                     "asset": asset_symbol,
@@ -324,14 +350,14 @@ class WalletPlatformFetcher:
                                     "unrealized_pnl": safe_float_convert(
                                         pos_data.get("unrealizedPnl", 0)
                                     ),
-                                    # Leverage is scaled by 1e4 in the API response
-                                    "leverage": safe_float_convert(
-                                        pos_data.get("leverage", {}).get("value", 0)
-                                    )
-                                    / 1e4,
+                                    "leverage": leverage_value,
                                     "liquidation_price": safe_float_convert(
                                         pos_data.get("liquidationPx", 0)
                                     ),
+                                    "margin": margin_used,
+                                    "funding": funding_val,
+                                    "mark_price": mark_price,
+                                    "position_value": position_value,
                                 }
                             )
                         except Exception as e:
@@ -343,6 +369,7 @@ class WalletPlatformFetcher:
                     "address": addr,
                     "platform": "hyperliquid",
                     "total_balance": balance_usd,
+                    "margin_total_used": margin_used_total,
                     "open_positions": position_info,
                     "source": "Hyperliquid API",
                 }
@@ -419,6 +446,33 @@ class WalletPlatformFetcher:
                                 pass
                         if abs(position_size) < 1e-9 and abs(position_value) < 1e-6:
                             continue
+                        mark_price = safe_float_convert(pos.get("mark_price", 0))
+                        if (
+                            not mark_price
+                            and abs(position_size) > 1e-9
+                            and abs(position_value) > 0
+                        ):
+                            mark_price = abs(position_value) / abs(position_size)
+
+                        initial_margin_fraction = safe_float_convert(
+                            pos.get("initial_margin_fraction", 0)
+                        )
+                        margin_val = safe_float_convert(
+                            pos.get("margin")
+                            or pos.get("position_margin")
+                            or pos.get("allocated_margin")
+                            or pos.get("initial_margin", 0)
+                        )
+                        if margin_val <= 0 and initial_margin_fraction > 0:
+                            margin_val = abs(position_value) * (initial_margin_fraction / 100.0)
+
+                        leverage_val = safe_float_convert(pos.get("leverage", 0))
+                        if leverage_val <= 0:
+                            if margin_val > 0:
+                                leverage_val = abs(position_value) / margin_val
+                            elif initial_margin_fraction > 0:
+                                leverage_val = 100.0 / initial_margin_fraction
+
                         positions.append(
                             {
                                 "symbol": pos.get("symbol"),
@@ -433,6 +487,10 @@ class WalletPlatformFetcher:
                                     pos.get("liquidation_price", 0)
                                 ),
                                 "margin_mode": pos.get("margin_mode"),
+                                "margin": margin_val,
+                                "leverage": leverage_val,
+                                "mark_price": mark_price,
+                                "initial_margin_fraction": initial_margin_fraction,
                             }
                         )
                     except Exception as exc:

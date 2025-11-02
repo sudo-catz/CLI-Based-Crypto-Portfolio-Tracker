@@ -422,10 +422,15 @@ class PortfolioAnalyzer:
                     removed_value = min(current_total, deduction)
                     new_total = max(current_total - removed_value, 0.0)
 
+                    if "total_balance_original" not in entry:
+                        entry["total_balance_original"] = current_total
+
                     if "total_balance" in entry:
                         entry["total_balance"] = new_total
                     elif "total_balance_usd" in entry:
                         entry["total_balance_usd"] = new_total
+
+                    entry["total_balance_adjusted"] = new_total
 
                     entry.setdefault("adjustments", {})["hyperliquid_deduction"] = removed_value
                     hyperliquid_totals[address] -= removed_value
@@ -513,6 +518,114 @@ class PortfolioAnalyzer:
                 else:
                     print_info("   ℹ️ No Ethereum addresses configured")
 
+            # Detect Polymarket exposure reported directly by DeBank to avoid double counting
+            if eth_exposure_data:
+                debank_polymarket_map: Dict[str, float] = {}
+                for addr_key, data in eth_exposure_data.items():
+                    if not isinstance(addr_key, str) or not isinstance(data, dict):
+                        continue
+                    export = data.get("export_data")
+                    if not isinstance(export, dict):
+                        continue
+                    for protocol in export.get("protocols", []) or []:
+                        if not isinstance(protocol, dict):
+                            continue
+                        name = str(protocol.get("name", "")).strip().lower()
+                        if name != "polymarket":
+                            continue
+                        total_value = safe_float_convert(protocol.get("total_value", 0.0))
+                        if total_value > 0.01:
+                            debank_polymarket_map[addr_key.lower()] = total_value
+                        break  # Only need first Polymarket entry per address
+
+                if debank_polymarket_map:
+                    for entry in wallet_data:
+                        if not isinstance(entry, dict):
+                            continue
+                        if entry.get("platform") != "polymarket" or entry.get("error"):
+                            continue
+                        owner_addr = entry.get("address")
+                        if not isinstance(owner_addr, str):
+                            continue
+                        covered_total = debank_polymarket_map.get(owner_addr.lower())
+                        if covered_total is None:
+                            continue
+
+                        entry["excluded_from_totals"] = True
+                        entry.setdefault("metadata", {})["debank_polymarket_total"] = covered_total
+                        entry["total_balance_original"] = entry.get("total_balance", 0.0)
+                        entry["debank_polymarket_detected"] = True
+
+                        existing_notes = entry.get("notes")
+                        note_text = (
+                            "DeBank now reports Polymarket for this wallet; excluded from totals to avoid double counting."
+                        )
+                        if isinstance(existing_notes, list):
+                            if note_text not in existing_notes:
+                                existing_notes.append(note_text)
+                        elif isinstance(existing_notes, str) and existing_notes != note_text:
+                            entry["notes"] = [existing_notes, note_text]
+                        else:
+                            entry["notes"] = [note_text]
+
+                        print_info(
+                            f"   ℹ️ Polymarket already included via DeBank for {owner_addr[:8]}..., "
+                            "excluding manual balance from portfolio totals."
+                        )
+
+            # Fallback: if DeBank scraped wallet exists for the owner, assume Polymarket already included
+            if wallet_data:
+                debank_wallets = {}
+                for wallet_entry in wallet_data:
+                    if not isinstance(wallet_entry, dict):
+                        continue
+                    if str(wallet_entry.get("chain", "")).lower() != "ethereum":
+                        continue
+                    source_str = str(wallet_entry.get("source", "")).lower()
+                    if "debank" not in source_str:
+                        continue
+                    address_str = wallet_entry.get("address")
+                    if isinstance(address_str, str):
+                        debank_wallets[address_str.lower()] = True
+
+                if debank_wallets:
+                    for entry in wallet_data:
+                        if not isinstance(entry, dict):
+                            continue
+                        if entry.get("platform") != "polymarket" or entry.get("error"):
+                            continue
+                        if entry.get("excluded_from_totals"):
+                            continue
+                        owner_addr = entry.get("address")
+                        if not isinstance(owner_addr, str):
+                            continue
+                        if owner_addr.lower() not in debank_wallets:
+                            continue
+
+                        entry["excluded_from_totals"] = True
+                        entry.setdefault("metadata", {})["debank_polymarket_total"] = safe_float_convert(
+                            entry.get("total_balance", 0.0)
+                        )
+                        entry["total_balance_original"] = entry.get("total_balance", 0.0)
+                        entry["debank_polymarket_detected"] = True
+
+                        existing_notes = entry.get("notes")
+                        note_text = (
+                            "Excluded from totals because DeBank now reports Polymarket for this wallet."
+                        )
+                        if isinstance(existing_notes, list):
+                            if note_text not in existing_notes:
+                                existing_notes.append(note_text)
+                        elif isinstance(existing_notes, str) and existing_notes != note_text:
+                            entry["notes"] = [existing_notes, note_text]
+                        else:
+                            entry["notes"] = [note_text]
+
+                        print_info(
+                            f"   ℹ️ DeBank wallet detected for {owner_addr[:8]}..., "
+                            "excluding Polymarket proxy balance from portfolio totals."
+                        )
+
             print_info(
                 f"   💼 Scanned: {len(wallet_data)}/{wallet_count} sources ({wallet_time:.1f}s)"
             )
@@ -527,6 +640,21 @@ class PortfolioAnalyzer:
                         total_value = safe_float_convert(export_data.get("total_usd_value", 0.0))
                         token_count = len(export_data.get("tokens") or [])
                         protocol_count = len(export_data.get("protocols") or [])
+                        native_eth_balance = 0.0
+                        native_eth_value = 0.0
+                        tokens_snapshot = export_data.get("tokens", [])
+                        if isinstance(tokens_snapshot, list):
+                            for token in tokens_snapshot:
+                                if not isinstance(token, dict):
+                                    continue
+                                symbol = str(token.get("symbol", "")).upper()
+                                if symbol != "ETH":
+                                    continue
+                                chain_name = str(token.get("chain", "")).lower()
+                                if chain_name and chain_name not in ("ethereum", "eth"):
+                                    continue
+                                native_eth_balance += safe_float_convert(token.get("amount", 0.0))
+                                native_eth_value += safe_float_convert(token.get("usd_value", 0.0))
                         enhanced_entries.append(
                             {
                                 "address": address,
@@ -536,6 +664,9 @@ class PortfolioAnalyzer:
                                 "protocol_count": protocol_count,
                                 "source": "DeBank (Enhanced)",
                                 "analysis_timestamp": export_data.get("timestamp"),
+                                "native_balance": native_eth_balance,
+                                "native_balance_usd": native_eth_value,
+                                "native_symbol": "ETH",
                             }
                         )
                     else:
@@ -574,10 +705,15 @@ class PortfolioAnalyzer:
                             removed_value = min(current_total, deduction)
                             new_total = max(current_total - removed_value, 0.0)
 
+                            if "total_balance_original" not in entry:
+                                entry["total_balance_original"] = current_total
+
                             if "total_balance" in entry:
                                 entry["total_balance"] = new_total
                             elif "total_balance_usd" in entry:
                                 entry["total_balance_usd"] = new_total
+
+                            entry["total_balance_adjusted"] = new_total
 
                             entry.setdefault("adjustments", {})[
                                 "hyperliquid_deduction"
@@ -742,7 +878,9 @@ class PortfolioAnalyzer:
             "polymarket": sum(
                 info.get("total_balance", 0.0)
                 for info in wallet_data
-                if info.get("platform") == "polymarket" and not info.get("error")
+                if info.get("platform") == "polymarket"
+                and not info.get("error")
+                and not info.get("excluded_from_totals")
             ),
             # Use None for CEX if fetch failed
             "binance": fetched_data.get("binance_total"),  # Can be None
