@@ -58,7 +58,6 @@ See `requirements.txt` for complete list. Key dependencies:
 ### 1. Clone and Setup Environment
 ```bash
 git clone <repository-url>
-cd Port2
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
